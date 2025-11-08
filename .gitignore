@@ -51,7 +51,6 @@ htmlcov/
 data/reference/
 *.parquet
 *.feather
-*.csv
 *.tsv
 *.log
 
