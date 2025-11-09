@@ -45,10 +45,22 @@ If you skip `RPT_DATASETS`/`--dataset`, the server still runs—every MCP call w
 
 ### Docker (SSE transport)
 
-The Dockerfile now exposes a reusable base-image argument so you can template builds for multiple use cases. Packaging the sample HR dataset looks like this:
+The root `Dockerfile` is a reusable template that expects datasets to be mounted at runtime:
 
 ```bash
-docker build -t hr-rpt-mcp-server --build-arg BASE_IMAGE=python:3.12-slim .
+docker build -t rpt-mcp .
+docker run \
+  -p 8080:8080 \
+  -v $(pwd)/examples/data:/data:ro \
+  -e RPT_API_TOKEN=... \
+  -e RPT_DATASETS='{"ibm_hr": {"path": "/data/reference/WA_Fn-UseC_-HR-Employee-Attrition.csv"}}' \
+  rpt-mcp
+```
+
+For a self-contained HR demo, an example-specific Dockerfile lives under `examples/Dockerfile.hr` and bundles the sample dataset directly:
+
+```bash
+docker build -f examples/Dockerfile.hr -t hr-rpt-mcp-server --build-arg BASE_IMAGE=python:3.12-slim .
 docker run \
   -p 8080:8080 \
   -e RPT_API_TOKEN=... \
@@ -56,7 +68,7 @@ docker run \
   hr-rpt-mcp-server
 ```
 
-Because the dataset lives under `examples/data/reference/`, the image bundles it automatically—no bind mount is required for the HR demo. The entrypoint defaults to `--transport sse --host 0.0.0.0 --port 8080`, so remote MCP clients can connect over Server-Sent Events without a separate wrapper process.
+Both images default to `--transport sse --host 0.0.0.0 --port 8080`, so remote MCP clients can connect over Server-Sent Events without a separate wrapper process.
 
 ## IBM HR Attrition Examples
 

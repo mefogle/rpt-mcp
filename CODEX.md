@@ -43,10 +43,17 @@ RPT_API_TOKEN=... uv run python -m scripts.run_attrition_server --dataset exampl
 
 Skipping dataset registration is valid—the server will simply pass all caller-provided rows directly to SAP, filling empty fields with `[PREDICT]` automatically.
 
-Docker image (SSE-only):
+Docker options (SSE-only):
 
 ```
-docker build -t hr-rpt-mcp-server --build-arg BASE_IMAGE=python:3.12-slim .
+docker build -t rpt-mcp .
+docker run -p8080:8080 \
+  -v $(pwd)/examples/data:/data:ro \
+  -e RPT_API_TOKEN=... \
+  -e RPT_DATASETS='{"ibm_hr": {"path": "/data/reference/WA_Fn-UseC_-HR-Employee-Attrition.csv"}}' \
+  rpt-mcp
+
+docker build -f examples/Dockerfile.hr -t hr-rpt-mcp-server --build-arg BASE_IMAGE=python:3.12-slim .
 docker run -p8080:8080 \
   -e RPT_API_TOKEN=... \
   -e RPT_DATASETS='{"ibm_hr": {"path": "/app/examples/data/reference/WA_Fn-UseC_-HR-Employee-Attrition.csv"}}' \
