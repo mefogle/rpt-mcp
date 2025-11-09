@@ -31,18 +31,15 @@ def _extract_text_from_content(block: Any) -> Optional[str]:
 
 def _collect_response_text(response: Any) -> List[str]:
     chunks: List[str] = []
-    output = getattr(response, "output", None)
-    if output:
-        for item in output:
-            contents = getattr(item, "content", None)
-            if contents:
-                for content in contents:
-                    text = _extract_text_from_content(content)
-                    if text:
-                        chunks.append(text)
+
+    # Priority 1: Check 'output_text' first, as it's simple and direct.
     output_text = getattr(response, "output_text", None)
     if isinstance(output_text, str) and output_text.strip():
         chunks.append(output_text)
+        # Found it. Stop and return immediately.
+        return chunks
+
+    # Priority 2: If 'output_text' is missing, check the 'choices' field.
     choices = getattr(response, "choices", None)
     if choices:
         for choice in choices:
@@ -54,6 +51,27 @@ def _collect_response_text(response: Any) -> List[str]:
                         text = content.get("text")
                         if isinstance(text, str) and text.strip():
                             chunks.append(text)
+        
+        # If we found any text in 'choices', return it and stop.
+        if chunks:
+            return chunks
+
+    # Priority 3: As a last resort, check the 'output' field.
+    output = getattr(response, "output", None)
+    if output:
+        for item in output:
+            contents = getattr(item, "content", None)
+            if contents:
+                for content in contents:
+                    text = _extract_text_from_content(content)
+                    if text:
+                        chunks.append(text)
+        
+        # If we found any text in 'output', return it.
+        if chunks:
+            return chunks
+    
+    # If no text was found anywhere, return the empty list.
     return chunks
 
 
@@ -67,5 +85,10 @@ async def generate_summary_text(model: str, prompt: str) -> str:
     client = _get_client()
     response = await client.responses.create(model=model, input=prompt)
     chunks = _collect_response_text(response)
+
+    # --- ADD THIS LINE TO TEST ---
+    print(f"DEBUG: Chunks collected: {chunks}")
+    # -----------------------------
+
     text = _normalize_text(chunks)
     return text or str(response)
