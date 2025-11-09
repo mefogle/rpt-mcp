@@ -88,6 +88,8 @@ The agent loads the 1,470-row IBM dataset as context, scores the 12 survey entri
 
 > The synthetic survey rows capture a mix of scenarios (new grads, mid-level scientists, sales executives with long commutes, etc.) so the classifier produces both low- and high-risk predictions that showcase how the agent surfaces risk factors.
 
+**Schema reminder:** keep every column from the dataset in your query payloads. Leave unknown values empty/`null` (the JSON literal `null`, not the string `"null"`); the server handles the normalization. Do not remove columns.
+
 ## Testing
 
 ```bash

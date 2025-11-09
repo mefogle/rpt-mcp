@@ -430,10 +430,15 @@ def predict_tabular(
         dataset_id: Optional reference dataset identifier for context rows.
         rows_json: JSON-encoded list of query rows.
         index_column: Column used as the SAP index (defaults to an internal __row_id).
-        context_rows: Cap on how many reference rows to attach (<= MAX_CONTEXT_ROWS).
+        context_rows: Cap on how many reference rows to attach (<= MAX_CONTEXT_ROWS, default 2048). Most callers should use the default so SAP receives the richest possible context.
         max_rows: Optional limit on the number of query rows processed.
         max_context_size: Parameter forwarded to SAP (if provided).
         bagging: Parameter forwarded to SAP (if provided).
+
+    Guidance for callers:
+        * Always include the full schema. Do NOT drop columns even if every value is unknown.
+        * Represent missing values as actual JSON nulls or Python None (e.g., {"Attrition": null}). Do NOT emit the literal string "null" or remove the column.
+        * Empty strings, whitespace-only strings, NaN, or None are all acceptable ways to mark unknown cells.
     """
     try:
         query_df = _rows_from_json(rows_json)
