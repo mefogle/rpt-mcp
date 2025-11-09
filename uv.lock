@@ -1643,7 +1643,7 @@ examples = [
 
 [package.metadata]
 requires-dist = [
-    { name = "fastmcp", specifier = "~=2.13" },
+    { name = "fastmcp", specifier = ">=2.13" },
     { name = "mcp", marker = "extra == 'examples'", specifier = "~=1.21" },
     { name = "numpy", specifier = "~=2.3" },
     { name = "openai", marker = "extra == 'examples'", specifier = "~=2.7" },

@@ -5,7 +5,7 @@ import inspect
 import json
 import logging
 import os
-from typing import Dict, Mapping, Optional, Sequence
+from typing import Dict, List, Mapping, Optional, Sequence
 
 from . import server
 
@@ -15,22 +15,7 @@ DEFAULT_TRANSPORT = os.getenv("RPT_MCP_TRANSPORT", "stdio")
 DEFAULT_HOST = os.getenv("RPT_MCP_HOST", "0.0.0.0")
 DEFAULT_PORT = int(os.getenv("RPT_MCP_PORT", "8080"))
 DEFAULT_SSE_PATH = os.getenv("RPT_MCP_SSE_PATH", "/sse")
-DEFAULT_ALLOWED_ORIGINS = os.getenv("RPT_MCP_ALLOWED_ORIGINS", "*")
 DATASET_MAP_ENV = os.getenv("RPT_DATASETS")
-DEFAULT_ALLOWED_ORIGIN_LIST = None  # initialized after helper definition
-
-
-def _split_origins(raw: Optional[str]) -> Optional[Sequence[str]]:
-    if raw is None:
-        return None
-    if not raw.strip():
-        return None
-    if raw.strip() == "*":
-        return ["*"]
-    return [part.strip() for part in raw.split(",") if part.strip()]
-
-
-DEFAULT_ALLOWED_ORIGIN_LIST = _split_origins(DEFAULT_ALLOWED_ORIGINS)
 
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
@@ -58,12 +43,6 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         help="HTTP path that exposes the SSE endpoint (default: /sse)",
     )
     parser.add_argument(
-        "--allowed-origins",
-        default=DEFAULT_ALLOWED_ORIGIN_LIST,
-        nargs="+",
-        help="List of allowed CORS origins for SSE clients (default: '*')",
-    )
-    parser.add_argument(
         "--dataset",
         action="append",
         dest="datasets",
@@ -77,6 +56,13 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         "--log-level",
         default=os.getenv("RPT_MCP_LOG_LEVEL", "INFO"),
         help="Logging level (default: INFO)",
+    )
+    parser.add_argument(
+        "--allowed-origins",
+        action="append",
+        dest="allowed_origins",
+        default=None,
+        help="Comma-separated list of origins permitted to connect when transport=sse (repeatable).",
     )
     return parser.parse_args(argv)
 
@@ -170,8 +156,8 @@ def serve(
     host: str = DEFAULT_HOST,
     port: int = DEFAULT_PORT,
     sse_path: str = DEFAULT_SSE_PATH,
-    allowed_origins: Optional[Sequence[str]] = DEFAULT_ALLOWED_ORIGIN_LIST,
     dataset_map: Optional[Mapping[str, Mapping[str, str]]] = None,
+    allowed_origins: Optional[Sequence[str]] = None,
 ) -> None:
     """Start the MCP server with the requested transport."""
     log_level = logging.getLogger().level
@@ -182,20 +168,12 @@ def serve(
     run_kwargs = {"transport": transport}
     if transport == "sse":
         accepted = _accepted_keywords(server.mcp.run)
-        origins_value = list(allowed_origins) if allowed_origins else None
         extra = {
             "host": host,
             "port": port,
             "path": sse_path,
+            "allowed_origins": allowed_origins,
         }
-        if origins_value is not None:
-            if "allowed_origins" in accepted or "**" in accepted:
-                extra["allowed_origins"] = origins_value
-            else:
-                for alias in ("allow_origins", "allowed_origin", "allow_origin"):
-                    if alias in accepted:
-                        extra[alias] = origins_value
-                        break
         run_kwargs = _apply_kwargs(run_kwargs, extra, accepted)
 
     logger.info("Starting SAP RPT MCP server via transport=%s", transport)
@@ -212,11 +190,22 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     except ValueError as exc:
         raise SystemExit(f"Invalid dataset configuration: {exc}") from exc
 
+    allowed_origins = None
+    if args.allowed_origins:
+        parsed: List[str] = []
+        for item in args.allowed_origins:
+            for origin in str(item).split(","):
+                origin = origin.strip()
+                if origin:
+                    parsed.append(origin)
+        if parsed:
+            allowed_origins = parsed
+
     serve(
         transport=args.transport,
         host=args.host,
         port=args.port,
         sse_path=args.sse_path,
-        allowed_origins=args.allowed_origins,
         dataset_map=dataset_map,
+        allowed_origins=allowed_origins,
     )

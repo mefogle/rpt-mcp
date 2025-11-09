@@ -4,7 +4,7 @@ import json
 import logging
 import os
 from pathlib import Path
-from typing import Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
@@ -32,16 +32,16 @@ except ImportError:  # pragma: no cover
         def run(self, *args, **kwargs):
             raise RuntimeError("FastMCP dependency missing; install fastmcp to run the server.")
 
+
 mcp = FastMCP("sap-rpt-tabular-predictor")
 
-# Global caches for models and reference datasets
-_prediction_config_cache = {}
-_reference_data_cache = {}
+# Reference datasets keyed by dataset_id
+_reference_data_cache: Dict[str, Dict[str, Any]] = {}
 
 logger = logging.getLogger(__name__)
 
 PREDICT_TOKEN = "[PREDICT]"
-INDEX_COLUMN = "__row_id"
+DEFAULT_ROW_ID_FIELD = "__row_id"
 MAX_CONTEXT_ROWS = 2048
 
 
@@ -81,13 +81,20 @@ class SAPRPTClient:
         self.timeout = timeout
         self.session = session or requests.Session()
 
-    def predict(self, rows: List[Dict[str, object]], index_column: Optional[str] = None) -> Dict[str, object]:
-        payload: Dict[str, object] = {"rows": rows}
+    def predict(
+        self,
+        rows: List[Dict[str, Any]],
+        index_column: Optional[str] = None,
+        parameters: Optional[Mapping[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {"rows": rows}
         if index_column:
             payload["index_column"] = index_column
+        if parameters:
+            payload["parameters"] = dict(parameters)
         return self._post("/api/predict", payload)
 
-    def _post(self, path: str, payload: Dict[str, object]) -> Dict[str, object]:
+    def _post(self, path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         url = f"{self.base_url}{path}"
         headers = {
             "Authorization": f"Bearer {self.api_token}",
@@ -126,13 +133,12 @@ __all__ = [
     "list_available_datasets",
     "get_dataset_schema",
     "get_dataset_sample",
-    "list_cached_models",
-    "predict_classification",
-    "predict_regression",
-    "predict_batch_from_file",
-    "clear_model_cache",
+    "predict_tabular",
     "initialize_reference_datasets",
     "set_rpt_client",
+    "get_rpt_client",
+    "PREDICT_TOKEN",
+    "MAX_CONTEXT_ROWS",
 ]
 
 
@@ -157,14 +163,25 @@ def _resolve_reference_dataframe(dataset_id: Optional[str]) -> Optional[pd.DataF
     return info["dataframe"]
 
 
+def _rows_from_json(rows_json: str) -> pd.DataFrame:
+    payload = json.loads(rows_json)
+    if isinstance(payload, Mapping):
+        payload = payload.get("rows") or payload.get("data") or payload
+    if isinstance(payload, Sequence) and not isinstance(payload, (str, bytes)):
+        return pd.DataFrame(list(payload))
+    raise ValueError("rows_json must encode a list of row dictionaries.")
+
+
 def _chunk_dataframe(df: pd.DataFrame, size: int) -> Sequence[pd.DataFrame]:
     if len(df) == 0:
         return []
+    if size <= 0:
+        return [df]
     return [df.iloc[start : start + size] for start in range(0, len(df), size)]
 
 
-def _sanitize_record(record: Dict[str, object]) -> Dict[str, object]:
-    sanitized = {}
+def _sanitize_record(record: Dict[str, Any]) -> Dict[str, Any]:
+    sanitized: Dict[str, Any] = {}
     for key, value in record.items():
         if value is None:
             sanitized[key] = PREDICT_TOKEN
@@ -183,29 +200,36 @@ def _sanitize_record(record: Dict[str, object]) -> Dict[str, object]:
 
 
 def _build_prediction_payload(
-    context_records: List[Dict[str, object]],
-    query_records: List[Dict[str, object]],
+    context_records: List[Dict[str, Any]],
+    query_records: List[Dict[str, Any]],
     query_offset: int,
-) -> Tuple[List[Dict[str, object]], List[str]]:
-    rows: List[Dict[str, object]] = []
+    row_id_field: str,
+) -> Tuple[List[Dict[str, Any]], List[str]]:
+    rows: List[Dict[str, Any]] = []
     query_ids: List[str] = []
 
     for idx, record in enumerate(context_records):
         row = _sanitize_record(record)
-        row[INDEX_COLUMN] = f"context-{idx}"
+        value = row.get(row_id_field)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            row[row_id_field] = f"context-{idx}"
         rows.append(row)
 
     for idx, record in enumerate(query_records):
-        row_id = f"query-{query_offset + idx}"
         row = _sanitize_record(record)
-        row[INDEX_COLUMN] = row_id
+        value = row.get(row_id_field)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            row_id = f"query-{query_offset + idx}"
+        else:
+            row_id = str(value)
+        row[row_id_field] = row_id
         rows.append(row)
         query_ids.append(row_id)
 
     return rows, query_ids
 
 
-def _decode_prediction_cell(value: object) -> object:
+def _decode_prediction_cell(value: Any) -> Any:
     if isinstance(value, list) and value:
         top = value[0]
         if isinstance(top, dict):
@@ -216,23 +240,23 @@ def _decode_prediction_cell(value: object) -> object:
     return value
 
 
-def _extract_predictions(report: Dict[str, object]) -> Dict[str, Dict[str, object]]:
+def _extract_predictions(report: Dict[str, Any], row_id_field: str) -> Dict[str, Dict[str, Any]]:
     prediction_block = report.get("prediction", {})
     entries = prediction_block.get("predictions", []) if isinstance(prediction_block, dict) else []
-    mapping: Dict[str, Dict[str, object]] = {}
+    mapping: Dict[str, Dict[str, Any]] = {}
 
     for entry in entries:
         if not isinstance(entry, dict):
             continue
-        row_id = entry.get(INDEX_COLUMN)
-        if not row_id:
+        row_id = entry.get(row_id_field)
+        if row_id is None:
             continue
-        decoded: Dict[str, object] = {}
+        decoded: Dict[str, Any] = {}
         for column, value in entry.items():
-            if column == INDEX_COLUMN:
+            if column == row_id_field:
                 continue
             decoded[column] = _decode_prediction_cell(value)
-        mapping[row_id] = decoded
+        mapping[str(row_id)] = decoded
 
     return mapping
 
@@ -240,31 +264,42 @@ def _extract_predictions(report: Dict[str, object]) -> Dict[str, Dict[str, objec
 def _invoke_prediction_pipeline(
     reference_df: Optional[pd.DataFrame],
     query_df: pd.DataFrame,
+    *,
+    row_id_field: str,
+    context_rows_limit: int,
     client: Optional[SAPRPTClient] = None,
-) -> Tuple[List[Dict[str, object]], float]:
+    parameters: Optional[Mapping[str, Any]] = None,
+    chunk_size: int = MAX_CONTEXT_ROWS,
+) -> Tuple[List[Dict[str, Any]], float]:
     if query_df.empty:
         return [], 0.0
 
-    context_records: List[Dict[str, object]] = []
-    if reference_df is not None and not reference_df.empty:
-        context_records = reference_df.head(MAX_CONTEXT_ROWS).to_dict(orient="records")
+    limit = max(0, min(context_rows_limit, MAX_CONTEXT_ROWS))
+    context_records: List[Dict[str, Any]] = []
+    if reference_df is not None and not reference_df.empty and limit:
+        context_records = reference_df.head(limit).to_dict(orient="records")
 
     client = client or get_rpt_client()
 
-    predictions: List[object] = []
+    predictions: List[Dict[str, Any]] = []
     total_delay = 0.0
     query_offset = 0
 
-    for chunk_df in _chunk_dataframe(query_df, MAX_CONTEXT_ROWS):
+    for chunk_df in _chunk_dataframe(query_df, max(1, chunk_size)):
         query_records = chunk_df.to_dict(orient="records")
-        rows, query_ids = _build_prediction_payload(context_records, query_records, query_offset)
-        report = client.predict(rows=rows, index_column=INDEX_COLUMN)
+        rows, query_ids = _build_prediction_payload(
+            context_records,
+            query_records,
+            query_offset,
+            row_id_field,
+        )
+        report = client.predict(rows=rows, index_column=row_id_field, parameters=parameters)
 
         delay = report.get("delay")
         if isinstance(delay, (int, float)):
             total_delay += float(delay)
 
-        mapping = _extract_predictions(report)
+        mapping = _extract_predictions(report, row_id_field)
         for row_id in query_ids:
             predictions.append(mapping.get(row_id, {}))
         query_offset += len(query_ids)
@@ -275,31 +310,31 @@ def _invoke_prediction_pipeline(
 def load_reference_dataset(dataset_id: str, filepath: str):
     """
     Load reference dataset at server initialization.
-    
+
     Args:
         dataset_id: Unique identifier for this dataset
         filepath: Path to the data file (CSV, Parquet, Feather, etc.)
     """
     file_ext = Path(filepath).suffix.lower()
-    
-    if file_ext == '.parquet':
+
+    if file_ext == ".parquet":
         df = pd.read_parquet(filepath)
-    elif file_ext == '.feather':
+    elif file_ext == ".feather":
         df = pd.read_feather(filepath)
-    elif file_ext == '.csv':
+    elif file_ext == ".csv":
         df = pd.read_csv(filepath)
     else:
         raise ValueError(f"Unsupported file format: {file_ext}")
-    
+
     _reference_data_cache[dataset_id] = {
-        'dataframe': df,
-        'filepath': filepath,
-        'shape': df.shape,
-        'columns': list(df.columns),
-        'dtypes': {col: str(dtype) for col, dtype in df.dtypes.items()}
+        "dataframe": df,
+        "filepath": filepath,
+        "shape": df.shape,
+        "columns": list(df.columns),
+        "dtypes": {col: str(dtype) for col, dtype in df.dtypes.items()},
     }
-    
-    logger.info(f"Loaded dataset '{dataset_id}': {df.shape[0]} rows, {df.shape[1]} columns")
+
+    logger.info("Loaded dataset '%s': %s rows, %s columns", dataset_id, df.shape[0], df.shape[1])
     return df
 
 
@@ -310,410 +345,185 @@ def load_reference_dataset(dataset_id: str, filepath: str):
 def list_available_datasets() -> str:
     """
     Lists all available reference datasets loaded in the server.
-    
+
     Returns:
         JSON string with dataset metadata including ID, shape, columns, and types
     """
     datasets = []
     for dataset_id, info in _reference_data_cache.items():
-        datasets.append({
-            "id": dataset_id,
-            "rows": info['shape'][0],
-            "columns": info['shape'][1],
-            "column_names": info['columns'],
-            "filepath": info['filepath']
-        })
-    
+        datasets.append(
+            {
+                "id": dataset_id,
+                "rows": info["shape"][0],
+                "columns": info["shape"][1],
+                "column_names": info["columns"],
+                "filepath": info["filepath"],
+            }
+        )
+
     return json.dumps({"datasets": datasets, "count": len(datasets)}, indent=2)
 
 
 def get_dataset_schema(dataset_id: str) -> str:
     """
     Get detailed schema information for a specific dataset.
-    
-    Args:
-        dataset_id: The ID of the dataset
-        
-    Returns:
-        JSON string with column-level metadata including types, null counts, unique values
     """
     if dataset_id not in _reference_data_cache:
         return json.dumps({"error": f"Dataset '{dataset_id}' not found"})
-    
+
     info = _reference_data_cache[dataset_id]
-    df = info['dataframe']
-    
+    df = info["dataframe"]
+
     schema = {
         "dataset_id": dataset_id,
-        "shape": {"rows": info['shape'][0], "columns": info['shape'][1]},
-        "columns": {}
+        "shape": {"rows": info["shape"][0], "columns": info["shape"][1]},
+        "columns": {},
     }
-    
+
     for col in df.columns:
         schema["columns"][col] = {
             "dtype": str(df[col].dtype),
             "non_null_count": int(df[col].count()),
             "null_count": int(df[col].isnull().sum()),
             "unique_values": int(df[col].nunique()),
-            "sample_values": df[col].dropna().head(5).tolist() if len(df[col].dropna()) > 0 else []
+            "sample_values": df[col].dropna().head(5).tolist() if df[col].notna().any() else [],
         }
-    
+
     return json.dumps(schema, indent=2)
 
 
 def get_dataset_sample(dataset_id: str, n_rows: int = 10) -> str:
     """
     Get a sample of rows from the dataset.
-    
-    Args:
-        dataset_id: The ID of the dataset
-        n_rows: Number of sample rows to return (default: 10)
-        
-    Returns:
-        JSON string with sample data
     """
     if dataset_id not in _reference_data_cache:
         return json.dumps({"error": f"Dataset '{dataset_id}' not found"})
-    
-    df = _reference_data_cache[dataset_id]['dataframe']
+
+    df = _reference_data_cache[dataset_id]["dataframe"]
     sample_df = df.head(n_rows)
-    
-    return json.dumps({
+
+    return json.dumps(
+        {
+            "dataset_id": dataset_id,
+            "sample_size": len(sample_df),
+            "data": sample_df.to_dict(orient="records"),
+        },
+        indent=2,
+        default=str,
+    )
+
+
+def predict_tabular(
+    dataset_id: Optional[str] = None,
+    *,
+    rows_json: str,
+    index_column: Optional[str] = None,
+    context_rows: Optional[int] = None,
+    max_rows: Optional[int] = None,
+    max_context_size: Optional[int] = None,
+    bagging: Optional[int] = None,
+) -> Dict[str, Any]:
+    """
+    Unified prediction tool that proxies directly to SAP's /api/predict endpoint.
+
+    Args:
+        dataset_id: Optional reference dataset identifier for context rows.
+        rows_json: JSON-encoded list of query rows.
+        index_column: Column used as the SAP index (defaults to an internal __row_id).
+        context_rows: Cap on how many reference rows to attach (<= MAX_CONTEXT_ROWS).
+        max_rows: Optional limit on the number of query rows processed.
+        max_context_size: Parameter forwarded to SAP (if provided).
+        bagging: Parameter forwarded to SAP (if provided).
+    """
+    try:
+        query_df = _rows_from_json(rows_json)
+    except (ValueError, json.JSONDecodeError) as exc:
+        return {"error": f"Failed to parse rows_json: {exc}"}
+
+    if max_rows and max_rows > 0:
+        query_df = query_df.head(max_rows)
+
+    if query_df.empty:
+        return {
+            "dataset_id": dataset_id,
+            "predictions": [],
+            "num_predictions": 0,
+            "context_rows_included": 0,
+            "delay_seconds": 0.0,
+            "request_metadata": {
+                "index_column": index_column or DEFAULT_ROW_ID_FIELD,
+                "context_rows_requested": context_rows or 0,
+            },
+        }
+
+    reference_df = None
+    if dataset_id:
+        try:
+            reference_df = _resolve_reference_dataframe(dataset_id)
+        except KeyError:
+            return {
+                "error": f"Dataset '{dataset_id}' not found",
+                "available_datasets": list(_reference_data_cache.keys()),
+            }
+
+    requested_context_rows = MAX_CONTEXT_ROWS if context_rows is None else context_rows
+    context_limit = max(0, min(int(requested_context_rows), MAX_CONTEXT_ROWS))
+    context_rows_included = min(len(reference_df), context_limit) if reference_df is not None else 0
+
+    row_id_field = (index_column or DEFAULT_ROW_ID_FIELD).strip() or DEFAULT_ROW_ID_FIELD
+
+    parameters: Dict[str, Any] = {}
+    if max_context_size is not None:
+        parameters["max_context_size"] = max_context_size
+    if bagging is not None:
+        parameters["bagging"] = bagging
+
+    try:
+        predictions, total_delay = _invoke_prediction_pipeline(
+            reference_df,
+            query_df,
+            row_id_field=row_id_field,
+            context_rows_limit=context_limit,
+            client=get_rpt_client(),
+            parameters=parameters or None,
+        )
+    except (SAPRPTError, RuntimeError) as exc:
+        logger.error("Prediction failed: %s", exc)
+        payload: Dict[str, Any] = {
+            "error": f"Prediction failed: {exc}",
+            "error_type": type(exc).__name__,
+        }
+        if isinstance(exc, SAPRPTError):
+            payload["status_code"] = exc.status_code
+            if exc.retry_after:
+                payload["retry_after"] = exc.retry_after
+        return payload
+
+    request_metadata: Dict[str, Any] = {
+        "index_column": row_id_field,
+        "context_rows_included": context_rows_included,
+    }
+    if bagging is not None:
+        request_metadata["bagging"] = bagging
+    if max_context_size is not None:
+        request_metadata["max_context_size"] = max_context_size
+    request_metadata["context_rows_requested"] = requested_context_rows
+
+    return {
         "dataset_id": dataset_id,
-        "sample_size": len(sample_df),
-        "data": sample_df.to_dict(orient='records')
-    }, indent=2, default=str)
-
-
-def list_cached_models() -> str:
-    """
-    Lists all currently cached (fitted) models in memory.
-    
-    Returns:
-        JSON string with information about cached models
-    """
-    models = []
-    for model_key, model_info in _prediction_config_cache.items():
-        models.append({
-            "key": model_key,
-            "type": model_info['type'],
-            "dataset_id": model_info['dataset_id'],
-            "config": model_info['config']
-        })
-    
-    return json.dumps({"cached_models": models, "count": len(models)}, indent=2)
-
-
-# ============================================================================
-# MCP TOOLS - Prediction Operations
-# ============================================================================
-
-def predict_classification(
-    dataset_id: Optional[str] = None,
-    *,
-    test_data_json: str,
-    max_context_size: int = 8192,
-    bagging: int = 8,
-) -> dict:
-    """
-    Predict categorical values in tabular data via the SAP RPT cloud API.
-    """
-    try:
-        try:
-            test_data = json.loads(test_data_json)
-            if isinstance(test_data, dict) and 'data' in test_data:
-                test_data = test_data['data']
-            test_df = pd.DataFrame(test_data)
-        except Exception as exc:
-            return {"error": f"Failed to parse test_data_json: {exc}"}
-
-        reference_df = None
-        if dataset_id:
-            try:
-                reference_df = _resolve_reference_dataframe(dataset_id)
-            except KeyError:
-                return {
-                    "error": f"Dataset '{dataset_id}' not found",
-                    "available_datasets": list(_reference_data_cache.keys()),
-                }
-
-        client = get_rpt_client()
-        predictions_list, _ = _invoke_prediction_pipeline(reference_df, test_df, client=client)
-
-        model_dataset = dataset_id or "__adhoc__"
-        model_key = f"{model_dataset}_clf_{max_context_size}_{bagging}"
-        api_base_url = getattr(client, "base_url", "sap-rpt-api")
-        context_rows = min(len(reference_df), MAX_CONTEXT_ROWS) if reference_df is not None else 0
-        _prediction_config_cache[model_key] = {
-            'model': 'sap-rpt-api',
-            'type': 'classifier',
-            'dataset_id': dataset_id,
-            'config': {
-                'max_context_size': max_context_size,
-                'bagging': bagging,
-                'api_base_url': api_base_url,
-                'context_rows': context_rows,
-            }
-        }
-
-        result = {
-            "predictions": predictions_list,
-            "num_predictions": len(predictions_list),
-            "model_config": _prediction_config_cache[model_key]['config'],
-        }
-
-        return result
-
-    except (SAPRPTError, RuntimeError) as exc:
-        logger.error("Classification prediction failed: %s", exc)
-        payload = {
-            "error": f"Prediction failed: {exc}",
-            "error_type": type(exc).__name__,
-        }
-        if isinstance(exc, SAPRPTError):
-            payload["status_code"] = exc.status_code
-            if exc.retry_after:
-                payload["retry_after"] = exc.retry_after
-        return payload
-
-
-def predict_regression(
-    dataset_id: Optional[str] = None,
-    *,
-    test_data_json: str,
-    max_context_size: int = 8192,
-    bagging: int = 8,
-) -> dict:
-    """
-    Predict numerical target values via the SAP RPT cloud prediction API.
-    """
-    try:
-        try:
-            test_data = json.loads(test_data_json)
-            if isinstance(test_data, dict) and 'data' in test_data:
-                test_data = test_data['data']
-            test_df = pd.DataFrame(test_data)
-        except Exception as exc:
-            return {"error": f"Failed to parse test_data_json: {exc}"}
-
-        reference_df = None
-        if dataset_id:
-            try:
-                reference_df = _resolve_reference_dataframe(dataset_id)
-            except KeyError:
-                return {
-                    "error": f"Dataset '{dataset_id}' not found",
-                    "available_datasets": list(_reference_data_cache.keys()),
-                }
-
-        client = get_rpt_client()
-        predictions_list, _ = _invoke_prediction_pipeline(reference_df, test_df, client=client)
-
-        numeric_values = []
-        for row in predictions_list:
-            if not row:
-                continue
-            for value in row.values():
-                try:
-                    numeric_values.append(float(value))
-                except (TypeError, ValueError):
-                    continue
-
-        statistics = {"mean": None, "std": None, "min": None, "max": None, "median": None}
-        if numeric_values:
-            pred_array = np.array(numeric_values, dtype=float)
-            statistics = {
-                "mean": float(np.mean(pred_array)),
-                "std": float(np.std(pred_array)),
-                "min": float(np.min(pred_array)),
-                "max": float(np.max(pred_array)),
-                "median": float(np.median(pred_array)),
-            }
-
-        model_dataset = dataset_id or "__adhoc__"
-        model_key = f"{model_dataset}_reg_{max_context_size}_{bagging}"
-        api_base_url = getattr(client, "base_url", "sap-rpt-api")
-        context_rows = min(len(reference_df), MAX_CONTEXT_ROWS) if reference_df is not None else 0
-        _prediction_config_cache[model_key] = {
-            'model': 'sap-rpt-api',
-            'type': 'regressor',
-            'dataset_id': dataset_id,
-            'config': {
-                'max_context_size': max_context_size,
-                'bagging': bagging,
-                'api_base_url': api_base_url,
-                'context_rows': context_rows,
-            }
-        }
-
-        return {
-            "predictions": predictions_list,
-            "num_predictions": len(predictions_list),
-            "statistics": statistics,
-            "model_config": _prediction_config_cache[model_key]['config'],
-        }
-
-    except (SAPRPTError, RuntimeError) as exc:
-        logger.error("Regression prediction failed: %s", exc)
-        payload = {
-            "error": f"Prediction failed: {exc}",
-            "error_type": type(exc).__name__,
-        }
-        if isinstance(exc, SAPRPTError):
-            payload["status_code"] = exc.status_code
-            if exc.retry_after:
-                payload["retry_after"] = exc.retry_after
-        return payload
-
-
-def predict_batch_from_file(
-    dataset_id: Optional[str] = None,
-    *,
-    input_file_path: str,
-    output_file_path: str,
-    task_type: str = "classification",
-    max_context_size: int = 8192,
-    bagging: int = 8,
-) -> dict:
-    """
-    Process large test files directly without passing data through JSON.
-    
-    This is more efficient for large datasets as it avoids JSON serialization overhead.
-    
-    Args:
-        dataset_id: ID of the reference dataset
-        input_file_path: Path to input CSV/Parquet file with test data
-        output_file_path: Path where predictions should be saved
-        task_type: Either "classification" or "regression"
-        max_context_size: Maximum context size (default: 8192)
-        bagging: Bagging factor (default: 8)
-    
-    Returns:
-        Dictionary with processing status and output file path
-    """
-    try:
-        input_path = Path(input_file_path)
-        if not input_path.exists():
-            return {"error": f"Input file not found: {input_file_path}"}
-
-        if input_path.suffix.lower() == '.csv':
-            test_df = pd.read_csv(input_file_path)
-        elif input_path.suffix.lower() == '.parquet':
-            test_df = pd.read_parquet(input_file_path)
-        else:
-            return {"error": f"Unsupported file format: {input_path.suffix}"}
-
-        reference_df = None
-        if dataset_id:
-            try:
-                reference_df = _resolve_reference_dataframe(dataset_id)
-            except KeyError:
-                return {
-                    "error": f"Dataset '{dataset_id}' not found",
-                    "available_datasets": list(_reference_data_cache.keys()),
-                }
-
-        client = get_rpt_client()
-        predictions, _ = _invoke_prediction_pipeline(reference_df, test_df, client=client)
-
-        if len(predictions) != len(test_df):
-            return {"error": "Prediction count does not match input rows."}
-
-        result_df = test_df.copy()
-        for idx, row_predictions in enumerate(predictions):
-            if not row_predictions:
-                continue
-            for column, value in row_predictions.items():
-                result_df.loc[result_df.index[idx], f"{column}_predicted"] = value
-
-        output_path = Path(output_file_path)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-
-        if output_path.suffix.lower() == '.csv':
-            result_df.to_csv(output_file_path, index=False)
-        elif output_path.suffix.lower() == '.parquet':
-            result_df.to_parquet(output_file_path, index=False)
-        else:
-            return {"error": f"Unsupported output format: {output_path.suffix}"}
-
-        model_dataset = dataset_id or "__adhoc__"
-        model_key = f"{model_dataset}_{task_type[:3]}_{max_context_size}_{bagging}"
-        api_base_url = getattr(client, "base_url", "sap-rpt-api")
-        context_rows = min(len(reference_df), MAX_CONTEXT_ROWS) if reference_df is not None else 0
-        _prediction_config_cache[model_key] = {
-            'model': 'sap-rpt-api',
-            'type': task_type,
-            'dataset_id': dataset_id,
-            'config': {
-                'max_context_size': max_context_size,
-                'bagging': bagging,
-                'api_base_url': api_base_url,
-                'context_rows': context_rows,
-            }
-        }
-
-        return {
-            "status": "success",
-            "input_file": input_file_path,
-            "output_file": output_file_path,
-            "num_predictions": len(predictions),
-            "task_type": task_type
-        }
-
-    except (SAPRPTError, RuntimeError) as exc:
-        logger.error("Batch prediction failed: %s", exc)
-        payload = {
-            "error": f"Batch prediction failed: {exc}",
-            "error_type": type(exc).__name__,
-        }
-        if isinstance(exc, SAPRPTError):
-            payload["status_code"] = exc.status_code
-            if exc.retry_after:
-                payload["retry_after"] = exc.retry_after
-        return payload
-
-
-def clear_model_cache(model_key: Optional[str] = None) -> dict:
-    """
-    Clear cached models from memory.
-    
-    Args:
-        model_key: Specific model key to clear, or None to clear all models
-    
-    Returns:
-        Dictionary with clearance status
-    """
-    global _prediction_config_cache
-    
-    if model_key:
-        if model_key in _prediction_config_cache:
-            del _prediction_config_cache[model_key]
-            return {"status": "success", "cleared": model_key}
-        else:
-            return {"error": f"Model key '{model_key}' not found in cache"}
-    else:
-        num_cleared = len(_prediction_config_cache)
-        _prediction_config_cache = {}
-        return {"status": "success", "cleared_count": num_cleared}
-
-
-# Register MCP resources and tools without shadowing underlying callables
-mcp.resource("datasets://available")(list_available_datasets)
-mcp.resource("datasets://{dataset_id}/schema")(get_dataset_schema)
-mcp.resource("datasets://{dataset_id}/sample")(get_dataset_sample)
-mcp.resource("models://cached")(list_cached_models)
-
-mcp.tool()(predict_classification)
-mcp.tool()(predict_regression)
-mcp.tool()(predict_batch_from_file)
-mcp.tool()(clear_model_cache)
+        "predictions": predictions,
+        "num_predictions": len(predictions),
+        "context_rows_included": context_rows_included,
+        "delay_seconds": total_delay,
+        "request_metadata": request_metadata,
+    }
 
 
 # ============================================================================
 # SERVER INITIALIZATION AND STARTUP
 # ============================================================================
 
-def initialize_reference_datasets(dataset_map: Optional[Mapping[str, Mapping[str, object]]] = None) -> None:
+def initialize_reference_datasets(dataset_map: Optional[Mapping[str, Mapping[str, Any]]] = None) -> None:
     """Load reference datasets defined by dataset_id -> path mappings."""
     if not dataset_map:
         logger.info("No reference datasets configured; running in query-only mode.")
@@ -732,3 +542,11 @@ def initialize_reference_datasets(dataset_map: Optional[Mapping[str, Mapping[str
         load_reference_dataset(dataset_id=dataset_id, filepath=str(path))
 
     logger.info("Loaded %s reference datasets", len(_reference_data_cache))
+
+
+# Register MCP resources and tools without shadowing underlying callables
+mcp.resource("datasets://available")(list_available_datasets)
+mcp.resource("datasets://{dataset_id}/schema")(get_dataset_schema)
+mcp.resource("datasets://{dataset_id}/sample")(get_dataset_sample)
+
+mcp.tool()(predict_tabular)

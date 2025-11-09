@@ -84,7 +84,7 @@ OPENAI_API_KEY=... RPT_API_TOKEN=... uv run python -m examples.batch_attrition_a
   --reference examples/data/reference/WA_Fn-UseC_-HR-Employee-Attrition.csv
 ```
 
-The agent loads the 1,470-row IBM dataset as context, scores the 12 survey entries via `predict_classification`, flags everyone who seems likely to leave and produces an HR-friendly summary with risk factors and recommendations.
+The agent loads the 1,470-row IBM dataset as context, scores the 12 survey entries via the unified `predict_tabular` MCP tool, flags everyone who seems likely to leave and produces an HR-friendly summary with risk factors and recommendations.
 
 > The synthetic survey rows capture a mix of scenarios (new grads, mid-level scientists, sales executives with long commutes, etc.) so the classifier produces both low- and high-risk predictions that showcase how the agent surfaces risk factors.
 

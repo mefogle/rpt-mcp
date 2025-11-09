@@ -2,35 +2,27 @@
 
 from .cli import main, serve
 from .server import (
-    clear_model_cache,
     get_rpt_client,
     get_dataset_sample,
     get_dataset_schema,
     initialize_reference_datasets,
     list_available_datasets,
-    list_cached_models,
     load_reference_dataset,
     mcp,
-    predict_batch_from_file,
-    predict_classification,
-    predict_regression,
+    predict_tabular,
     set_rpt_client,
 )
 
 __all__ = [
-    "clear_model_cache",
     "get_rpt_client",
     "get_dataset_sample",
     "get_dataset_schema",
     "initialize_reference_datasets",
     "list_available_datasets",
-    "list_cached_models",
     "load_reference_dataset",
     "main",
     "mcp",
-    "predict_batch_from_file",
-    "predict_classification",
-    "predict_regression",
+    "predict_tabular",
     "serve",
     "set_rpt_client",
 ]

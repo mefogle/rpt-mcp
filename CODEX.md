@@ -78,7 +78,7 @@ The script defaults to the bundled dataset; pass a different `--reference` path 
 
 ### Attrition Risk Output
 
-- The SAP API does not expose class probabilities yet. `predict_classification` returns placeholder probability structures, so prompts have been tuned to speak qualitatively (e.g., “high risk” and “schedule retention conversations”).
+- The SAP API returns categorical predictions only. The unified `predict_tabular` tool surfaces those labels directly, so prompts should speak qualitatively (e.g., “high risk” or “schedule retention conversations”) instead of quoting probabilities.
 
 ## Testing & Validation
 

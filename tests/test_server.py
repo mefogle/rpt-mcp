@@ -13,11 +13,9 @@ PREDICT_TOKEN = server.PREDICT_TOKEN
 @pytest.fixture(autouse=True)
 def reset_caches():
     server._reference_data_cache.clear()
-    server._prediction_config_cache.clear()
     server.set_rpt_client(None)
     yield
     server._reference_data_cache.clear()
-    server._prediction_config_cache.clear()
     server.set_rpt_client(None)
 
 
@@ -41,19 +39,6 @@ def classification_dataset(tmp_path):
     return df
 
 
-@pytest.fixture
-def regression_dataset(tmp_path):
-    df = pd.DataFrame(
-        {
-            "units": [10, 15, 7, 20],
-            "discount": [0.1, 0.0, 0.2, 0.05],
-            "revenue": [1000.0, 1500.0, 700.0, 2200.0],
-        }
-    )
-    _write_dataset(tmp_path, "regression", df)
-    return df
-
-
 class DummySAPClient:
     def __init__(self):
         self.column_predictions = {}
@@ -62,20 +47,22 @@ class DummySAPClient:
     def set_predictions(self, column: str, values):
         self.column_predictions[column] = deque(values)
 
-    def predict(self, rows, index_column=None):
+    def predict(self, rows, index_column=None, parameters=None):
         predictions = []
         for row in rows:
             row_id = row.get(index_column) if isinstance(row, dict) else None
-            if not row_id or not str(row_id).startswith("query-"):
+            if not row_id:
+                continue
+            target_columns = [column for column, value in row.items() if value == PREDICT_TOKEN]
+            if not target_columns:
                 continue
             entry = {index_column: row_id} if index_column else {}
-            for column, value in row.items():
-                if value == PREDICT_TOKEN:
-                    queue = self.column_predictions.setdefault(column, deque())
-                    prediction_value = queue.popleft() if queue else f"{column}-pred"
-                    entry[column] = [{"prediction": prediction_value}]
+            for column in target_columns:
+                queue = self.column_predictions.setdefault(column, deque())
+                prediction_value = queue.popleft() if queue else f"{column}-pred"
+                entry[column] = [{"prediction": prediction_value}]
             predictions.append(entry)
-        self.requests.append({"rows": rows, "index_column": index_column})
+        self.requests.append({"rows": rows, "index_column": index_column, "parameters": parameters})
         return {
             "prediction": {
                 "id": "dummy",
@@ -132,98 +119,63 @@ def test_get_dataset_schema_returns_column_stats(classification_dataset):
     assert region["non_null_count"] == len(classification_dataset)
 
 
-def test_predict_classification_allows_query_only(mock_rpt_client):
+def test_predict_tabular_allows_query_only(mock_rpt_client):
     mock_rpt_client.set_predictions("churned", ["yes"])
     test_rows = [{"region": "na", "segment": "enterprise", "churned": None}]
-    result = server.predict_classification(
-        test_data_json=json.dumps(test_rows),
-    )
+    result = server.predict_tabular(rows_json=json.dumps(test_rows))
 
     assert result["num_predictions"] == 1
+    assert result["context_rows_included"] == 0
     assert result["predictions"][0]["churned"] == "yes"
 
 
-def test_predict_classification_returns_predictions(classification_dataset, mock_rpt_client):
+def test_predict_tabular_uses_reference_dataset(classification_dataset, mock_rpt_client):
     mock_rpt_client.set_predictions("churned", ["yes", "no"])
     test_rows = [
         {"region": "na", "segment": "enterprise", "churned": None},
         {"region": "apac", "segment": "enterprise", "churned": None},
     ]
-    result = server.predict_classification(
+    result = server.predict_tabular(
         dataset_id="classification",
-        test_data_json=json.dumps(test_rows),
+        rows_json=json.dumps(test_rows),
+        context_rows=2,
     )
 
     assert result["num_predictions"] == len(test_rows)
     predictions = result["predictions"]
     assert predictions[0]["churned"] == "yes"
     assert predictions[1]["churned"] == "no"
-    assert "predictions" in result
-
-    model_key = "classification_clf_8192_8"
-    assert model_key in server._prediction_config_cache
-    assert server._prediction_config_cache[model_key]["type"] == "classifier"
+    assert result["context_rows_included"] == 2
+    assert result["request_metadata"]["index_column"] == server.DEFAULT_ROW_ID_FIELD
 
 
-def test_predict_regression_returns_statistics(regression_dataset, mock_rpt_client):
-    mock_rpt_client.set_predictions("revenue", [1100.0, 1250.0])
-    test_rows = [
-        {"units": 5, "discount": 0.05, "revenue": None},
-        {"units": 9, "discount": 0.03, "revenue": None},
-    ]
-    result = server.predict_regression(
-        dataset_id="regression",
-        test_data_json=json.dumps(test_rows),
-    )
-
-    assert result["num_predictions"] == len(test_rows)
-    stats = result["statistics"]
-    assert stats["max"] >= stats["min"]
-    assert result["model_config"]["bagging"] == 8
-
-
-def test_predict_regression_errors_when_dataset_missing():
-    result = server.predict_regression(
+def test_predict_tabular_errors_when_dataset_missing():
+    result = server.predict_tabular(
         dataset_id="unknown",
-        test_data_json=json.dumps([{"col": 1}]),
+        rows_json=json.dumps([{"col": 1}]),
     )
     assert "Dataset 'unknown' not found" in result["error"]
 
 
-def test_predict_batch_from_file_outputs_predictions(tmp_path, classification_dataset, mock_rpt_client):
-    mock_rpt_client.set_predictions("churned", ["yes", "no"])
-    input_path = tmp_path / "batch.csv"
-    output_path = tmp_path / "predictions.csv"
-    batch_df = pd.DataFrame(
-        [
-            {"region": "na", "segment": "enterprise", "churned": None},
-            {"region": "eu", "segment": "smb", "churned": None},
-        ]
-    )
-    batch_df.to_csv(input_path, index=False)
-
-    result = server.predict_batch_from_file(
-        dataset_id="classification",
-        input_file_path=str(input_path),
-        output_file_path=str(output_path),
-        task_type="classification",
-    )
-
-    assert result["status"] == "success"
-    assert Path(result["output_file"]).exists()
-    written = pd.read_csv(output_path)
-    assert "churned_predicted" in written.columns
-
-
-def test_clear_model_cache_removes_entries(classification_dataset, mock_rpt_client):
+def test_predict_tabular_honors_custom_index_column(mock_rpt_client):
     mock_rpt_client.set_predictions("churned", ["yes"])
-    test_rows = [{"region": "na", "segment": "enterprise", "churned": None}]
-    server.predict_classification(
-        dataset_id="classification",
-        test_data_json=json.dumps(test_rows),
+    test_rows = [{"EmployeeNumber": "42", "region": "na", "churned": None}]
+    result = server.predict_tabular(
+        rows_json=json.dumps(test_rows),
+        index_column="EmployeeNumber",
     )
 
-    assert server._prediction_config_cache  # ensure populated
-    cleared = server.clear_model_cache()
-    assert cleared["cleared_count"] == 1
-    assert not server._prediction_config_cache
+    assert result["predictions"][0]["churned"] == "yes"
+    assert result["request_metadata"]["index_column"] == "EmployeeNumber"
+
+
+def test_predict_tabular_respects_max_rows(mock_rpt_client):
+    mock_rpt_client.set_predictions("churned", ["yes", "no"])
+    test_rows = [
+        {"region": "na", "churned": None},
+        {"region": "eu", "churned": None},
+    ]
+    result = server.predict_tabular(rows_json=json.dumps(test_rows), max_rows=1)
+
+    assert result["num_predictions"] == 1
+    assert len(mock_rpt_client.requests[-1]["rows"]) == 1

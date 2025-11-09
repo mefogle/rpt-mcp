@@ -9,7 +9,7 @@ description = "MCP server that exposes the SAP RPT cloud tabular prediction API 
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "fastmcp~=2.13",
+    "fastmcp>=2.13",
     "pandas~=2.3",
     "numpy~=2.3",
     "pyarrow~=22.0",

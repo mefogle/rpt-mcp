@@ -61,12 +61,15 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-async def call_predict_classification(session: ClientSession, rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+async def call_predict_tabular(session: ClientSession, rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     response = await session.call_tool(
-        "predict_classification",
+        "predict_tabular",
         arguments={
             "dataset_id": DATASET_ID,
-            "test_data_json": json.dumps(rows),
+            "rows_json": json.dumps(rows),
+            "index_column": "EmployeeNumber",
+            "context_rows": 2048,
+            "max_rows": 0,
             "max_context_size": 8192,
             "bagging": 8,
         },
@@ -125,7 +128,7 @@ async def run_analysis(args: argparse.Namespace) -> None:
     async with stdio_client(server_params) as (read, write):
         async with ClientSession(read, write) as session:
             await session.initialize()
-            prediction_payload = await call_predict_classification(session, survey_rows)
+            prediction_payload = await call_predict_tabular(session, survey_rows)
 
     raw_predictions = prediction_payload.get("predictions", [])
     predictions = [row.get(TARGET_COLUMN) if row else None for row in raw_predictions]
