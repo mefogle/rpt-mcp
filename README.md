@@ -6,7 +6,8 @@ MCP server that exposes SAP RPT cloud tabular predictions through FastMCP resour
 
 * **SAP RPT API token** – set the `RPT_API_TOKEN` environment variable with your personal token (see https://rpt.cloud.sap/docs). Optional overrides:
   * `RPT_API_BASE_URL` for pointing to non-production endpoints.
-* **Reference data** – populate `REFERENCE_DATA_DIR` with parquet/CSV datasets that act as the in-context examples for predictions.
+* **Reference data** – optionally set the `RPT_DATASETS` environment variable with a JSON object that maps dataset IDs to file paths. Example:
+  * `export RPT_DATASETS='{"ibm_hr": {"path": "data/reference/WA_Fn-UseC_-HR-Employee-Attrition.csv"}}'`
 
 ## Installation (with [`uv`](https://github.com/astral-sh/uv))
 
@@ -19,14 +20,47 @@ uv sync --extra dev --extra examples
 
 ## Running
 
-Launch the server in-place via `uv run` (which ensures the project is on `PYTHONPATH`):
+### Local stdio transport
 
 ```bash
-export RPT_API_TOKEN=...         # required
-export REFERENCE_DATA_DIR=...    # directory containing your parquet/csv files
+export RPT_API_TOKEN=...  # required
+export RPT_DATASETS='{"ibm_hr": {"path": "data/reference/WA_Fn-UseC_-HR-Employee-Attrition.csv"}}'
 
-uv run python -m rpt_mcp_server.server
+uv run python -m rpt_mcp_server --transport stdio
 ```
+
+### SSE transport (non-container)
+
+```bash
+uv run python -m rpt_mcp_server \
+  --transport sse \
+  --host 0.0.0.0 \
+  --port 8080 \
+  --allowed-origins https://your-agent.example \
+  --dataset ibm_hr=data/reference/WA_Fn-UseC_-HR-Employee-Attrition.csv
+```
+
+Each `--dataset` flag registers an ID/path pair. You can also configure the same mapping via `RPT_DATASETS`.
+
+If you skip `RPT_DATASETS`/`--dataset`, the server still runs—every MCP call will be treated as query-only input, and any missing values are automatically replaced with `[PREDICT]` before hitting the SAP API.
+
+### Docker (SSE transport)
+
+The container image only bundles the MCP server package—examples and dev extras stay outside the
+image. Build and run it like this:
+
+```bash
+docker build -t rpt-mcp .
+docker run \
+  -p 8080:8080 \
+  -e RPT_API_TOKEN=... \
+  -e RPT_DATASETS='{"ibm_hr": {"path": "/data/reference/WA_Fn-UseC_-HR-Employee-Attrition.csv"}}' \
+  -v $(pwd)/data/reference:/data/reference:ro \
+  rpt-mcp
+```
+
+The container entrypoint defaults to `--transport sse --host 0.0.0.0 --port 8080`, so remote MCP
+clients can connect over Server-Sent Events without a separate wrapper process.
 
 ## IBM HR Attrition Examples
 
@@ -43,7 +77,7 @@ RPT_API_TOKEN=... uv run python -m scripts.run_attrition_server \
   --dataset data/reference/WA_Fn-UseC_-HR-Employee-Attrition.csv
 
 # Terminal 2 – run an agent that calls predict_classification with new survey rows
-OPENAI_API_KEY=... RPT_API_TOKEN=... uv run python -m examples.pydantic_attrition_agent \
+OPENAI_API_KEY=... RPT_API_TOKEN=... uv run python -m examples.batch_attrition_agent \
   --survey data/new_employee_survey.csv \
   --reference data/reference/WA_Fn-UseC_-HR-Employee-Attrition.csv
 ```

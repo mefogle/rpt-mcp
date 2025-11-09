@@ -1,5 +1,6 @@
 """rpt-mcp server package."""
 
+from .cli import main, serve
 from .server import (
     clear_model_cache,
     get_rpt_client,
@@ -9,7 +10,6 @@ from .server import (
     list_available_datasets,
     list_cached_models,
     load_reference_dataset,
-    main,
     mcp,
     predict_batch_from_file,
     predict_classification,
@@ -31,5 +31,6 @@ __all__ = [
     "predict_batch_from_file",
     "predict_classification",
     "predict_regression",
+    "serve",
     "set_rpt_client",
 ]

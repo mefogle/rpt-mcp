@@ -1,4 +1,4 @@
-from rpt_mcp_server.server import main
+from rpt_mcp_server import main
 
 if __name__ == "__main__":
     main()

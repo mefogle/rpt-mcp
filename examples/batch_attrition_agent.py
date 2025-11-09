@@ -1,10 +1,10 @@
 #!/usr/bin/env python
 """
-Batch attrition analysis example that uses the MCP server + Pydantic AI.
+Batch attrition analysis example that uses the MCP server + OpenAI's Responses API.
 
 Usage:
     OPENAI_API_KEY=... RPT_API_TOKEN=... \
-        python examples/pydantic_attrition_agent.py \
+        python examples/batch_attrition_agent.py \
             --survey data/new_employee_survey.csv \
             --reference data/reference/WA_Fn-UseC_-HR-Employee-Attrition.csv
 """
@@ -21,9 +21,6 @@ from typing import Any, Dict, List
 import pandas as pd
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
-from pydantic_ai import Agent
-from pydantic_ai.models.openai import OpenAIModel
-
 from examples.attrition_utils import (
     DATASET_ID,
     HIGH_RISK_THRESHOLD,
@@ -31,6 +28,7 @@ from examples.attrition_utils import (
     probability_for_label,
     risk_factor_rules,
 )
+from examples.openai_utils import generate_summary_text
 
 
 def parse_args() -> argparse.Namespace:
@@ -66,7 +64,6 @@ async def call_predict_classification(session: ClientSession, rows: List[Dict[st
         "predict_classification",
         arguments={
             "dataset_id": DATASET_ID,
-            "target_column": TARGET_COLUMN,
             "test_data_json": json.dumps(rows),
             "return_probabilities": True,
         },
@@ -111,6 +108,8 @@ def build_high_risk_list(
 
 async def run_analysis(args: argparse.Namespace) -> None:
     survey_df = pd.read_csv(args.survey)
+    if TARGET_COLUMN in survey_df.columns:
+        survey_df[TARGET_COLUMN] = None
     survey_rows = survey_df.to_dict(orient="records")
 
     env = dict(os.environ)
@@ -122,15 +121,19 @@ async def run_analysis(args: argparse.Namespace) -> None:
         env=env,
     )
 
-    agent = Agent(model=OpenAIModel(args.model))
-
     async with stdio_client(server_params) as (read, write):
         async with ClientSession(read, write) as session:
             await session.initialize()
             prediction_payload = await call_predict_classification(session, survey_rows)
 
-    predictions = prediction_payload.get("predictions", [])
-    probabilities = prediction_payload.get("probabilities", [])
+    raw_predictions = prediction_payload.get("predictions", [])
+    raw_probabilities = prediction_payload.get("probabilities", [])
+
+    predictions = [row.get(TARGET_COLUMN) if row else None for row in raw_predictions]
+    probabilities = [
+        (row_probs or {}).get(TARGET_COLUMN, []) if isinstance(row_probs, dict) else []
+        for row_probs in raw_probabilities
+    ]
 
     high_risk = build_high_risk_list(survey_rows, predictions, probabilities)
 
@@ -161,8 +164,7 @@ async def run_analysis(args: argparse.Namespace) -> None:
         f"Payload:\n{json.dumps(summary_context, indent=2)}"
     )
 
-    result = await agent.run(summary_prompt)
-    output_text = getattr(result, "text", None) or getattr(result, "output_text", None) or str(result)
+    output_text = await generate_summary_text(args.model, summary_prompt)
     print(output_text)
 
 

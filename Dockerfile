@@ -1,0 +1,20 @@
+FROM python:3.12-slim
+
+ENV UV_SYSTEM_PYTHON=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+RUN pip install --no-cache-dir uv
+
+WORKDIR /app
+
+COPY pyproject.toml uv.lock README.md CODEX.md ./
+COPY src ./src
+COPY rpt-mcp-server.py ./rpt-mcp-server.py
+
+RUN uv sync --frozen --no-dev
+
+EXPOSE 8080
+
+ENTRYPOINT ["uv", "run", "python", "-m", "rpt_mcp_server"]
+CMD ["--transport", "sse", "--host", "0.0.0.0", "--port", "8080"]

@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 """
-Conversational single-employee attrition analysis using MCP + Pydantic AI.
+Conversational single-employee attrition analysis using MCP + OpenAI Responses.
 
 Example:
     OPENAI_API_KEY=... RPT_API_TOKEN=... \
@@ -20,15 +20,13 @@ from typing import Any, Dict, List, Optional
 import pandas as pd
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
-from pydantic_ai import Agent
-from pydantic_ai.models.openai import OpenAIModel
-
 from examples.attrition_utils import (
     DATASET_ID,
     TARGET_COLUMN,
     probability_for_label,
     risk_factor_rules,
 )
+from examples.openai_utils import generate_summary_text
 
 
 def parse_args() -> argparse.Namespace:
@@ -225,7 +223,6 @@ async def call_predict_classification(session: ClientSession, row: Dict[str, Any
         "predict_classification",
         arguments={
             "dataset_id": DATASET_ID,
-            "target_column": TARGET_COLUMN,
             "test_data_json": json.dumps([row]),
             "return_probabilities": True,
         },
@@ -240,6 +237,7 @@ async def assess_employee(args: argparse.Namespace) -> None:
     df = pd.read_csv(args.reference)
     baseline = build_baseline_row(df)
     profile, display_name = gather_employee_profile(df, baseline)
+    profile[TARGET_COLUMN] = None
 
     env = dict(os.environ)
     env.setdefault("RPT_API_TOKEN", os.environ.get("RPT_API_TOKEN", ""))
@@ -255,11 +253,12 @@ async def assess_employee(args: argparse.Namespace) -> None:
             await session.initialize()
             payload = await call_predict_classification(session, profile)
 
-    probability = probability_for_label(payload.get("probabilities", [[]])[0])
-    prediction = payload.get("predictions", ["No"])[0]
+    prediction_rows = payload.get("predictions", [{}])
+    probability_rows = payload.get("probabilities", [{}])
+    prediction = (prediction_rows[0] or {}).get(TARGET_COLUMN, "No")
+    probability = probability_for_label((probability_rows[0] or {}).get(TARGET_COLUMN))
     risk_factors = risk_factor_rules(profile)
 
-    agent = Agent(model=OpenAIModel(args.model))
     summary_payload = {
         "employee_name": display_name or profile.get("EmployeeNumber"),
         "employee_number": profile.get("EmployeeNumber"),
@@ -278,8 +277,7 @@ async def assess_employee(args: argparse.Namespace) -> None:
         f"Payload:\n{json.dumps(summary_payload, indent=2)}"
     )
 
-    result = await agent.run(summary_prompt)
-    output_text = getattr(result, "text", None) or getattr(result, "output_text", None) or str(result)
+    output_text = await generate_summary_text(args.model, summary_prompt)
     print("\n--- Attrition Assessment ---")
     print(output_text)
 

@@ -4,7 +4,7 @@ import json
 import logging
 import os
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
@@ -38,7 +38,6 @@ mcp = FastMCP("sap-rpt-tabular-predictor")
 _model_cache = {}
 _reference_data_cache = {}
 
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 PREDICT_TOKEN = "[PREDICT]"
@@ -134,7 +133,6 @@ __all__ = [
     "predict_batch_from_file",
     "clear_model_cache",
     "initialize_reference_datasets",
-    "main",
     "set_rpt_client",
 ]
 
@@ -151,13 +149,13 @@ def set_rpt_client(client: Optional[SAPRPTClient]) -> None:
     _sap_client = client
 
 
-def _select_context_rows(reference_df: pd.DataFrame, target_column: str) -> pd.DataFrame:
-    if target_column not in reference_df.columns:
-        raise ValueError(f"Target column '{target_column}' not found in reference dataset")
-    context_df = reference_df.dropna(subset=[target_column])
-    if len(context_df) < 2:
-        raise ValueError("At least two context rows with known target values are required.")
-    return context_df.head(MAX_CONTEXT_ROWS)
+def _resolve_reference_dataframe(dataset_id: Optional[str]) -> Optional[pd.DataFrame]:
+    if not dataset_id:
+        return None
+    info = _reference_data_cache.get(dataset_id)
+    if info is None:
+        raise KeyError(dataset_id)
+    return info["dataframe"]
 
 
 def _chunk_dataframe(df: pd.DataFrame, size: int) -> Sequence[pd.DataFrame]:
@@ -166,66 +164,92 @@ def _chunk_dataframe(df: pd.DataFrame, size: int) -> Sequence[pd.DataFrame]:
     return [df.iloc[start : start + size] for start in range(0, len(df), size)]
 
 
+def _sanitize_record(record: Dict[str, object]) -> Dict[str, object]:
+    sanitized = {}
+    for key, value in record.items():
+        if value is None:
+            sanitized[key] = PREDICT_TOKEN
+            continue
+        if isinstance(value, str):
+            sanitized[key] = value if value.strip() else PREDICT_TOKEN
+            continue
+        if isinstance(value, float) and (np.isnan(value) or np.isinf(value)):
+            sanitized[key] = PREDICT_TOKEN
+            continue
+        if pd.isna(value):
+            sanitized[key] = PREDICT_TOKEN
+            continue
+        sanitized[key] = value
+    return sanitized
+
+
 def _build_prediction_payload(
     context_records: List[Dict[str, object]],
     query_records: List[Dict[str, object]],
-    target_columns: Sequence[str],
     query_offset: int,
 ) -> Tuple[List[Dict[str, object]], List[str]]:
     rows: List[Dict[str, object]] = []
     query_ids: List[str] = []
 
     for idx, record in enumerate(context_records):
-        row = dict(record)
+        row = _sanitize_record(record)
         row[INDEX_COLUMN] = f"context-{idx}"
         rows.append(row)
 
     for idx, record in enumerate(query_records):
         row_id = f"query-{query_offset + idx}"
-        row = dict(record)
+        row = _sanitize_record(record)
         row[INDEX_COLUMN] = row_id
-        for column in target_columns:
-            row[column] = PREDICT_TOKEN
         rows.append(row)
         query_ids.append(row_id)
 
     return rows, query_ids
 
 
-def _extract_predictions(report: Dict[str, object], target_column: str) -> Dict[str, object]:
+def _decode_prediction_cell(value: object) -> object:
+    if isinstance(value, list) and value:
+        top = value[0]
+        if isinstance(top, dict):
+            return top.get("prediction")
+        return top
+    if isinstance(value, dict) and "prediction" in value:
+        return value.get("prediction")
+    return value
+
+
+def _extract_predictions(report: Dict[str, object]) -> Dict[str, Dict[str, object]]:
     prediction_block = report.get("prediction", {})
     entries = prediction_block.get("predictions", []) if isinstance(prediction_block, dict) else []
-    mapping: Dict[str, object] = {}
+    mapping: Dict[str, Dict[str, object]] = {}
 
     for entry in entries:
         if not isinstance(entry, dict):
             continue
         row_id = entry.get(INDEX_COLUMN)
-        column_predictions = entry.get(target_column, [])
-        value = None
-        if isinstance(column_predictions, list) and column_predictions:
-            top_prediction = column_predictions[0]
-            if isinstance(top_prediction, dict):
-                value = top_prediction.get("prediction")
-            else:
-                value = top_prediction
-        if row_id:
-            mapping[row_id] = value
+        if not row_id:
+            continue
+        decoded: Dict[str, object] = {}
+        for column, value in entry.items():
+            if column == INDEX_COLUMN:
+                continue
+            decoded[column] = _decode_prediction_cell(value)
+        mapping[row_id] = decoded
 
     return mapping
 
 
 def _invoke_prediction_pipeline(
-    reference_df: pd.DataFrame,
+    reference_df: Optional[pd.DataFrame],
     query_df: pd.DataFrame,
-    target_column: str,
     client: Optional[SAPRPTClient] = None,
-) -> Tuple[List[object], float]:
+) -> Tuple[List[Dict[str, object]], float]:
     if query_df.empty:
         return [], 0.0
 
-    context_df = _select_context_rows(reference_df, target_column)
-    context_records = context_df.to_dict(orient="records")
+    context_records: List[Dict[str, object]] = []
+    if reference_df is not None and not reference_df.empty:
+        context_records = reference_df.head(MAX_CONTEXT_ROWS).to_dict(orient="records")
+
     client = client or get_rpt_client()
 
     predictions: List[object] = []
@@ -234,29 +258,28 @@ def _invoke_prediction_pipeline(
 
     for chunk_df in _chunk_dataframe(query_df, MAX_QUERY_ROWS):
         query_records = chunk_df.to_dict(orient="records")
-        rows, query_ids = _build_prediction_payload(context_records, query_records, [target_column], query_offset)
+        rows, query_ids = _build_prediction_payload(context_records, query_records, query_offset)
         report = client.predict(rows=rows, index_column=INDEX_COLUMN)
 
         delay = report.get("delay")
         if isinstance(delay, (int, float)):
             total_delay += float(delay)
 
-        mapping = _extract_predictions(report, target_column)
+        mapping = _extract_predictions(report)
         for row_id in query_ids:
-            predictions.append(mapping.get(row_id))
+            predictions.append(mapping.get(row_id, {}))
         query_offset += len(query_ids)
 
     return predictions, total_delay
 
 
-def load_reference_dataset(dataset_id: str, filepath: str, target_column: Optional[str] = None):
+def load_reference_dataset(dataset_id: str, filepath: str):
     """
     Load reference dataset at server initialization.
     
     Args:
         dataset_id: Unique identifier for this dataset
         filepath: Path to the data file (CSV, Parquet, Feather, etc.)
-        target_column: Optional target column name for automatic splitting
     """
     file_ext = Path(filepath).suffix.lower()
     
@@ -271,7 +294,6 @@ def load_reference_dataset(dataset_id: str, filepath: str, target_column: Option
     
     _reference_data_cache[dataset_id] = {
         'dataframe': df,
-        'target_column': target_column,
         'filepath': filepath,
         'shape': df.shape,
         'columns': list(df.columns),
@@ -300,7 +322,6 @@ def list_available_datasets() -> str:
             "rows": info['shape'][0],
             "columns": info['shape'][1],
             "column_names": info['columns'],
-            "target_column": info.get('target_column'),
             "filepath": info['filepath']
         })
     
@@ -326,7 +347,6 @@ def get_dataset_schema(dataset_id: str) -> str:
     schema = {
         "dataset_id": dataset_id,
         "shape": {"rows": info['shape'][0], "columns": info['shape'][1]},
-        "target_column": info.get('target_column'),
         "columns": {}
     }
     
@@ -379,7 +399,6 @@ def list_cached_models() -> str:
             "key": model_key,
             "type": model_info['type'],
             "dataset_id": model_info['dataset_id'],
-            "target_column": model_info['target_column'],
             "config": model_info['config']
         })
     
@@ -391,32 +410,17 @@ def list_cached_models() -> str:
 # ============================================================================
 
 def predict_classification(
-    dataset_id: str,
-    target_column: str,
+    dataset_id: Optional[str] = None,
+    *,
     test_data_json: str,
     max_context_size: int = 8192,
     bagging: int = 8,
-    return_probabilities: bool = True
+    return_probabilities: bool = True,
 ) -> dict:
     """
     Predict categorical values in tabular data via the SAP RPT cloud API.
     """
     try:
-        if dataset_id not in _reference_data_cache:
-            return {
-                "error": f"Dataset '{dataset_id}' not found",
-                "available_datasets": list(_reference_data_cache.keys())
-            }
-
-        info = _reference_data_cache[dataset_id]
-        reference_df = info['dataframe']
-
-        if target_column not in reference_df.columns:
-            return {
-                "error": f"Target column '{target_column}' not found in dataset",
-                "available_columns": list(reference_df.columns)
-            }
-
         try:
             test_data = json.loads(test_data_json)
             if isinstance(test_data, dict) and 'data' in test_data:
@@ -425,40 +429,37 @@ def predict_classification(
         except Exception as exc:
             return {"error": f"Failed to parse test_data_json: {exc}"}
 
-        features_df = reference_df.drop(columns=[target_column])
-        test_features = test_df.drop(columns=[target_column], errors='ignore')
-        missing_cols = set(features_df.columns) - set(test_features.columns)
-        if missing_cols:
-            return {
-                "error": f"Test data is missing columns: {list(missing_cols)}",
-                "required_columns": list(features_df.columns)
-            }
-
-        if target_column not in test_df.columns:
-            test_df[target_column] = None
+        reference_df = None
+        if dataset_id:
+            try:
+                reference_df = _resolve_reference_dataframe(dataset_id)
+            except KeyError:
+                return {
+                    "error": f"Dataset '{dataset_id}' not found",
+                    "available_datasets": list(_reference_data_cache.keys()),
+                }
 
         client = get_rpt_client()
-        predictions, _ = _invoke_prediction_pipeline(reference_df, test_df, target_column, client=client)
-        predictions_list = list(predictions)
+        predictions_list, _ = _invoke_prediction_pipeline(reference_df, test_df, client=client)
 
-        model_key = f"{dataset_id}_{target_column}_clf_{max_context_size}_{bagging}"
+        model_dataset = dataset_id or "__adhoc__"
+        model_key = f"{model_dataset}_clf_{max_context_size}_{bagging}"
         api_base_url = getattr(client, "base_url", "sap-rpt-api")
+        context_rows = min(len(reference_df), MAX_CONTEXT_ROWS) if reference_df is not None else 0
         _model_cache[model_key] = {
             'model': 'sap-rpt-api',
             'type': 'classifier',
             'dataset_id': dataset_id,
-            'target_column': target_column,
             'config': {
                 'max_context_size': max_context_size,
                 'bagging': bagging,
                 'api_base_url': api_base_url,
-                'context_rows': min(len(reference_df), MAX_CONTEXT_ROWS),
+                'context_rows': context_rows,
             }
         }
 
         result = {
             "predictions": predictions_list,
-            "target_column": target_column,
             "num_predictions": len(predictions_list),
             "model_config": _model_cache[model_key]['config'],
         }
@@ -466,12 +467,15 @@ def predict_classification(
         if return_probabilities:
             probability_payload = []
             classes = set()
-            for prediction in predictions_list:
-                if prediction is None:
-                    probability_payload.append([])
-                    continue
-                classes.add(prediction)
-                probability_payload.append([{"prediction": prediction, "probability": 1.0}])
+            for row in predictions_list:
+                row_probs = {}
+                for column, value in (row or {}).items():
+                    if value is None:
+                        row_probs[column] = []
+                        continue
+                    classes.add(value)
+                    row_probs[column] = [{"prediction": value, "probability": 1.0}]
+                probability_payload.append(row_probs)
             result["probabilities"] = probability_payload
             result["classes"] = sorted(classes)
 
@@ -491,31 +495,16 @@ def predict_classification(
 
 
 def predict_regression(
-    dataset_id: str,
-    target_column: str,
+    dataset_id: Optional[str] = None,
+    *,
     test_data_json: str,
     max_context_size: int = 8192,
-    bagging: int = 8
+    bagging: int = 8,
 ) -> dict:
     """
     Predict numerical target values via the SAP RPT cloud prediction API.
     """
     try:
-        if dataset_id not in _reference_data_cache:
-            return {
-                "error": f"Dataset '{dataset_id}' not found",
-                "available_datasets": list(_reference_data_cache.keys())
-            }
-
-        info = _reference_data_cache[dataset_id]
-        reference_df = info['dataframe']
-
-        if target_column not in reference_df.columns:
-            return {
-                "error": f"Target column '{target_column}' not found in dataset",
-                "available_columns": list(reference_df.columns)
-            }
-
         try:
             test_data = json.loads(test_data_json)
             if isinstance(test_data, dict) and 'data' in test_data:
@@ -524,34 +513,30 @@ def predict_regression(
         except Exception as exc:
             return {"error": f"Failed to parse test_data_json: {exc}"}
 
-        features_df = reference_df.drop(columns=[target_column])
-        test_features = test_df.drop(columns=[target_column], errors='ignore')
-        missing_cols = set(features_df.columns) - set(test_features.columns)
-        if missing_cols:
-            return {
-                "error": f"Test data is missing columns: {list(missing_cols)}",
-                "required_columns": list(features_df.columns)
-            }
-
-        if target_column not in test_df.columns:
-            test_df[target_column] = None
+        reference_df = None
+        if dataset_id:
+            try:
+                reference_df = _resolve_reference_dataframe(dataset_id)
+            except KeyError:
+                return {
+                    "error": f"Dataset '{dataset_id}' not found",
+                    "available_datasets": list(_reference_data_cache.keys()),
+                }
 
         client = get_rpt_client()
-        predictions, _ = _invoke_prediction_pipeline(reference_df, test_df, target_column, client=client)
-        predictions_list = []
-        numeric_values = []
-        for prediction in predictions:
-            if prediction is None:
-                predictions_list.append(None)
-                continue
-            try:
-                numeric_value = float(prediction)
-                predictions_list.append(numeric_value)
-                numeric_values.append(numeric_value)
-            except (TypeError, ValueError):
-                predictions_list.append(prediction)
+        predictions_list, _ = _invoke_prediction_pipeline(reference_df, test_df, client=client)
 
-        statistics = {}
+        numeric_values = []
+        for row in predictions_list:
+            if not row:
+                continue
+            for value in row.values():
+                try:
+                    numeric_values.append(float(value))
+                except (TypeError, ValueError):
+                    continue
+
+        statistics = {"mean": None, "std": None, "min": None, "max": None, "median": None}
         if numeric_values:
             pred_array = np.array(numeric_values, dtype=float)
             statistics = {
@@ -561,27 +546,25 @@ def predict_regression(
                 "max": float(np.max(pred_array)),
                 "median": float(np.median(pred_array)),
             }
-        else:
-            statistics = {"mean": None, "std": None, "min": None, "max": None, "median": None}
 
-        model_key = f"{dataset_id}_{target_column}_reg_{max_context_size}_{bagging}"
+        model_dataset = dataset_id or "__adhoc__"
+        model_key = f"{model_dataset}_reg_{max_context_size}_{bagging}"
         api_base_url = getattr(client, "base_url", "sap-rpt-api")
+        context_rows = min(len(reference_df), MAX_CONTEXT_ROWS) if reference_df is not None else 0
         _model_cache[model_key] = {
             'model': 'sap-rpt-api',
             'type': 'regressor',
             'dataset_id': dataset_id,
-            'target_column': target_column,
             'config': {
                 'max_context_size': max_context_size,
                 'bagging': bagging,
                 'api_base_url': api_base_url,
-                'context_rows': min(len(reference_df), MAX_CONTEXT_ROWS),
+                'context_rows': context_rows,
             }
         }
 
         return {
             "predictions": predictions_list,
-            "target_column": target_column,
             "num_predictions": len(predictions_list),
             "statistics": statistics,
             "model_config": _model_cache[model_key]['config'],
@@ -601,13 +584,13 @@ def predict_regression(
 
 
 def predict_batch_from_file(
-    dataset_id: str,
-    target_column: str,
+    dataset_id: Optional[str] = None,
+    *,
     input_file_path: str,
     output_file_path: str,
     task_type: str = "classification",
     max_context_size: int = 8192,
-    bagging: int = 8
+    bagging: int = 8,
 ) -> dict:
     """
     Process large test files directly without passing data through JSON.
@@ -616,7 +599,6 @@ def predict_batch_from_file(
     
     Args:
         dataset_id: ID of the reference dataset
-        target_column: Column to predict
         input_file_path: Path to input CSV/Parquet file with test data
         output_file_path: Path where predictions should be saved
         task_type: Either "classification" or "regression"
@@ -627,12 +609,6 @@ def predict_batch_from_file(
         Dictionary with processing status and output file path
     """
     try:
-        if dataset_id not in _reference_data_cache:
-            return {
-                "error": f"Dataset '{dataset_id}' not found",
-                "available_datasets": list(_reference_data_cache.keys())
-            }
-
         input_path = Path(input_file_path)
         if not input_path.exists():
             return {"error": f"Input file not found: {input_file_path}"}
@@ -644,29 +620,28 @@ def predict_batch_from_file(
         else:
             return {"error": f"Unsupported file format: {input_path.suffix}"}
 
-        info = _reference_data_cache[dataset_id]
-        reference_df = info['dataframe']
-
-        features_df = reference_df.drop(columns=[target_column])
-        test_features = test_df.drop(columns=[target_column], errors='ignore')
-        missing_cols = set(features_df.columns) - set(test_features.columns)
-        if missing_cols:
-            return {
-                "error": f"Test data is missing columns: {list(missing_cols)}",
-                "required_columns": list(features_df.columns)
-            }
-
-        if target_column not in test_df.columns:
-            test_df[target_column] = None
+        reference_df = None
+        if dataset_id:
+            try:
+                reference_df = _resolve_reference_dataframe(dataset_id)
+            except KeyError:
+                return {
+                    "error": f"Dataset '{dataset_id}' not found",
+                    "available_datasets": list(_reference_data_cache.keys()),
+                }
 
         client = get_rpt_client()
-        predictions, _ = _invoke_prediction_pipeline(reference_df, test_df, target_column, client=client)
+        predictions, _ = _invoke_prediction_pipeline(reference_df, test_df, client=client)
 
         if len(predictions) != len(test_df):
             return {"error": "Prediction count does not match input rows."}
 
         result_df = test_df.copy()
-        result_df[f"{target_column}_predicted"] = predictions
+        for idx, row_predictions in enumerate(predictions):
+            if not row_predictions:
+                continue
+            for column, value in row_predictions.items():
+                result_df.loc[result_df.index[idx], f"{column}_predicted"] = value
 
         output_path = Path(output_file_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -678,18 +653,19 @@ def predict_batch_from_file(
         else:
             return {"error": f"Unsupported output format: {output_path.suffix}"}
 
-        model_key = f"{dataset_id}_{target_column}_{task_type[:3]}_{max_context_size}_{bagging}"
+        model_dataset = dataset_id or "__adhoc__"
+        model_key = f"{model_dataset}_{task_type[:3]}_{max_context_size}_{bagging}"
         api_base_url = getattr(client, "base_url", "sap-rpt-api")
+        context_rows = min(len(reference_df), MAX_CONTEXT_ROWS) if reference_df is not None else 0
         _model_cache[model_key] = {
             'model': 'sap-rpt-api',
             'type': task_type,
             'dataset_id': dataset_id,
-            'target_column': target_column,
             'config': {
                 'max_context_size': max_context_size,
                 'bagging': bagging,
                 'api_base_url': api_base_url,
-                'context_rows': min(len(reference_df), MAX_CONTEXT_ROWS),
+                'context_rows': context_rows,
             }
         }
 
@@ -754,43 +730,22 @@ mcp.tool()(clear_model_cache)
 # SERVER INITIALIZATION AND STARTUP
 # ============================================================================
 
-def initialize_reference_datasets(reference_data_dir: Optional[str] = None) -> None:
-    """
-    Load default reference datasets if they exist on disk.
+def initialize_reference_datasets(dataset_map: Optional[Mapping[str, Mapping[str, object]]] = None) -> None:
+    """Load reference datasets defined by dataset_id -> path mappings."""
+    if not dataset_map:
+        logger.info("No reference datasets configured; running in query-only mode.")
+        return
 
-    Args:
-        reference_data_dir: Directory containing parquet/csv reference data.
-    """
-    data_root = Path(reference_data_dir or os.getenv("REFERENCE_DATA_DIR", "/mnt/dgx/data/reference"))
+    for dataset_id, info in dataset_map.items():
+        if not dataset_id:
+            raise ValueError("Dataset IDs must be non-empty strings.")
+        if not isinstance(info, Mapping):
+            raise ValueError(f"Dataset config for '{dataset_id}' must be a mapping.")
 
-    try:
-        sales_path = data_root / "sales_history_2020_2024.parquet"
-        if sales_path.exists():
-            load_reference_dataset(
-                dataset_id="sales_history",
-                filepath=str(sales_path),
-                target_column="revenue"
-            )
+        path = info.get("path")
+        if not path:
+            raise ValueError(f"Dataset '{dataset_id}' is missing a 'path' entry.")
 
-        churn_path = data_root / "customer_churn.parquet"
-        if churn_path.exists():
-            load_reference_dataset(
-                dataset_id="customer_churn",
-                filepath=str(churn_path),
-                target_column="churned"
-            )
+        load_reference_dataset(dataset_id=dataset_id, filepath=str(path))
 
-        logger.info("Loaded %s reference datasets", len(_reference_data_cache))
-    except Exception as exc:
-        logger.warning("Failed to load some datasets: %s", exc)
-
-
-def main() -> None:
-    """Entry point for launching the MCP server."""
-    initialize_reference_datasets()
-    logger.info("Starting SAP RPT-1-OSS MCP Server...")
-    mcp.run(transport='stdio')
-
-
-if __name__ == "__main__":  # pragma: no cover
-    main()
+    logger.info("Loaded %s reference datasets", len(_reference_data_cache))

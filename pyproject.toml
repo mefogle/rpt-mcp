@@ -7,28 +7,27 @@ name = "rpt-mcp"
 version = "0.1.0"
 description = "MCP server that exposes the SAP RPT cloud tabular prediction API through FastMCP"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
-    "fastmcp>=0.2.6",
-    "pandas>=2.2",
-    "numpy>=1.26",
-    "pyarrow>=14.0",
-    "requests>=2.31",
+    "fastmcp~=2.13",
+    "pandas~=2.3",
+    "numpy~=2.3",
+    "pyarrow~=22.0",
+    "requests~=2.32",
 ]
 
 [project.optional-dependencies]
 dev = [
-    "pytest>=8.2",
-    "pytest-cov>=4.1",
+    "pytest>=9.0",
+    "pytest-cov>=7.0",
 ]
 examples = [
-    "mcp>=0.0.29",
-    "openai>=1.50.0",
-    "pydantic-ai>=0.0.13",
+    "mcp~=1.21",
+    "openai~=2.7",
 ]
 
 [project.scripts]
-rpt-mcp-server = "rpt_mcp_server.server:main"
+rpt-mcp-server = "rpt_mcp_server:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -36,4 +35,7 @@ where = ["src"]
 [tool.pytest.ini_options]
 addopts = "-q"
 testpaths = ["tests"]
-filterwarnings = ["error", "ignore::DeprecationWarning:pandas"]
+filterwarnings = [
+    "error",
+    "ignore::DeprecationWarning:pandas"
+]

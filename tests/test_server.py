@@ -21,10 +21,10 @@ def reset_caches():
     server.set_rpt_client(None)
 
 
-def _write_dataset(tmp_path: Path, dataset_id: str, df: pd.DataFrame, target_column: str) -> Path:
+def _write_dataset(tmp_path: Path, dataset_id: str, df: pd.DataFrame) -> Path:
     path = tmp_path / f"{dataset_id}.csv"
     df.to_csv(path, index=False)
-    server.load_reference_dataset(dataset_id=dataset_id, filepath=str(path), target_column=target_column)
+    server.load_reference_dataset(dataset_id=dataset_id, filepath=str(path))
     return path
 
 
@@ -37,7 +37,7 @@ def classification_dataset(tmp_path):
             "churned": ["yes", "no", "no"],
         }
     )
-    _write_dataset(tmp_path, "classification", df, "churned")
+    _write_dataset(tmp_path, "classification", df)
     return df
 
 
@@ -50,7 +50,7 @@ def regression_dataset(tmp_path):
             "revenue": [1000.0, 1500.0, 700.0, 2200.0],
         }
     )
-    _write_dataset(tmp_path, "regression", df, "revenue")
+    _write_dataset(tmp_path, "regression", df)
     return df
 
 
@@ -102,12 +102,11 @@ def test_load_reference_dataset_caches_metadata(tmp_path):
             "label": ["yes", "no", "yes"],
         }
     )
-    path = _write_dataset(tmp_path, "ds", df, "label")
+    path = _write_dataset(tmp_path, "ds", df)
 
     cached = server._reference_data_cache["ds"]
     assert cached["filepath"] == str(path)
     assert cached["shape"] == df.shape
-    assert cached["target_column"] == "label"
     assert cached["dtypes"]["feature_a"] == str(df["feature_a"].dtype)
 
 
@@ -133,16 +132,16 @@ def test_get_dataset_schema_returns_column_stats(classification_dataset):
     assert region["non_null_count"] == len(classification_dataset)
 
 
-def test_predict_classification_validates_missing_columns(classification_dataset):
-    test_rows = [{"region": "na"}]
+def test_predict_classification_allows_query_only(mock_rpt_client):
+    mock_rpt_client.set_predictions("churned", ["yes"])
+    test_rows = [{"region": "na", "segment": "enterprise", "churned": None}]
     result = server.predict_classification(
-        dataset_id="classification",
-        target_column="churned",
         test_data_json=json.dumps(test_rows),
+        return_probabilities=False,
     )
 
-    assert "missing columns" in result["error"]
-    assert "segment" in result["required_columns"]
+    assert result["num_predictions"] == 1
+    assert result["predictions"][0]["churned"] == "yes"
 
 
 def test_predict_classification_returns_predictions(classification_dataset, mock_rpt_client):
@@ -153,16 +152,16 @@ def test_predict_classification_returns_predictions(classification_dataset, mock
     ]
     result = server.predict_classification(
         dataset_id="classification",
-        target_column="churned",
         test_data_json=json.dumps(test_rows),
     )
 
     assert result["num_predictions"] == len(test_rows)
-    assert result["target_column"] == "churned"
+    predictions = result["predictions"]
+    assert predictions[0]["churned"] == "yes"
+    assert predictions[1]["churned"] == "no"
     assert "probabilities" in result
-    assert "classes" in result
 
-    model_key = "classification_churned_clf_8192_8"
+    model_key = "classification_clf_8192_8"
     assert model_key in server._model_cache
     assert server._model_cache[model_key]["type"] == "classifier"
 
@@ -170,12 +169,11 @@ def test_predict_classification_returns_predictions(classification_dataset, mock
 def test_predict_regression_returns_statistics(regression_dataset, mock_rpt_client):
     mock_rpt_client.set_predictions("revenue", [1100.0, 1250.0])
     test_rows = [
-        {"units": 5, "discount": 0.05},
-        {"units": 9, "discount": 0.03},
+        {"units": 5, "discount": 0.05, "revenue": None},
+        {"units": 9, "discount": 0.03, "revenue": None},
     ]
     result = server.predict_regression(
         dataset_id="regression",
-        target_column="revenue",
         test_data_json=json.dumps(test_rows),
     )
 
@@ -188,7 +186,6 @@ def test_predict_regression_returns_statistics(regression_dataset, mock_rpt_clie
 def test_predict_regression_errors_when_dataset_missing():
     result = server.predict_regression(
         dataset_id="unknown",
-        target_column="value",
         test_data_json=json.dumps([{"col": 1}]),
     )
     assert "Dataset 'unknown' not found" in result["error"]
@@ -200,15 +197,14 @@ def test_predict_batch_from_file_outputs_predictions(tmp_path, classification_da
     output_path = tmp_path / "predictions.csv"
     batch_df = pd.DataFrame(
         [
-            {"region": "na", "segment": "enterprise"},
-            {"region": "eu", "segment": "smb"},
+            {"region": "na", "segment": "enterprise", "churned": None},
+            {"region": "eu", "segment": "smb", "churned": None},
         ]
     )
     batch_df.to_csv(input_path, index=False)
 
     result = server.predict_batch_from_file(
         dataset_id="classification",
-        target_column="churned",
         input_file_path=str(input_path),
         output_file_path=str(output_path),
         task_type="classification",
@@ -222,10 +218,9 @@ def test_predict_batch_from_file_outputs_predictions(tmp_path, classification_da
 
 def test_clear_model_cache_removes_entries(classification_dataset, mock_rpt_client):
     mock_rpt_client.set_predictions("churned", ["yes"])
-    test_rows = [{"region": "na", "segment": "enterprise"}]
+    test_rows = [{"region": "na", "segment": "enterprise", "churned": None}]
     server.predict_classification(
         dataset_id="classification",
-        target_column="churned",
         test_data_json=json.dumps(test_rows),
         return_probabilities=False,
     )
