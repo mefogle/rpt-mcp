@@ -49,7 +49,6 @@ htmlcov/
 *.swp
 
 # Local data/output
-data/reference/
 *.parquet
 *.feather
 *.tsv

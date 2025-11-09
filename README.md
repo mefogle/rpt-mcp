@@ -6,8 +6,7 @@ MCP server that exposes SAP RPT cloud tabular predictions through FastMCP resour
 
 * **SAP RPT API token** – set the `RPT_API_TOKEN` environment variable with your personal token (see https://rpt.cloud.sap/docs). Optional overrides:
   * `RPT_API_BASE_URL` for pointing to non-production endpoints.
-* **Reference data** – optionally set the `RPT_DATASETS` environment variable with a JSON object that maps dataset IDs to file paths. Example:
-  * `export RPT_DATASETS='{"ibm_hr": {"path": "data/reference/WA_Fn-UseC_-HR-Employee-Attrition.csv"}}'`
+* **Reference data** – the repo ships with a trimmed IBM HR dataset under `examples/data/reference/`. Use it as-is or swap in your own file by pointing `RPT_DATASETS` (e.g. `export RPT_DATASETS='{"ibm_hr": {"path": "examples/data/reference/WA_Fn-UseC_-HR-Employee-Attrition.csv"}}'`).
 
 ## Installation (with [`uv`](https://github.com/astral-sh/uv))
 
@@ -24,7 +23,7 @@ uv sync --extra dev --extra examples
 
 ```bash
 export RPT_API_TOKEN=...  # required
-export RPT_DATASETS='{"ibm_hr": {"path": "data/reference/WA_Fn-UseC_-HR-Employee-Attrition.csv"}}'
+export RPT_DATASETS='{"ibm_hr": {"path": "examples/data/reference/WA_Fn-UseC_-HR-Employee-Attrition.csv"}}'
 
 uv run python -m rpt_mcp_server --transport stdio
 ```
@@ -37,7 +36,7 @@ uv run python -m rpt_mcp_server \
   --host 0.0.0.0 \
   --port 8080 \
   --allowed-origins https://your-agent.example \
-  --dataset ibm_hr=data/reference/WA_Fn-UseC_-HR-Employee-Attrition.csv
+  --dataset ibm_hr=examples/data/reference/WA_Fn-UseC_-HR-Employee-Attrition.csv
 ```
 
 Each `--dataset` flag registers an ID/path pair. You can also configure the same mapping via `RPT_DATASETS`.
@@ -46,35 +45,31 @@ If you skip `RPT_DATASETS`/`--dataset`, the server still runs—every MCP call w
 
 ### Docker (SSE transport)
 
-The container image only bundles the MCP server package—examples and dev extras stay outside the
-image. Build and run it like this:
+The Dockerfile now exposes a reusable base-image argument so you can template builds for multiple use cases. Packaging the sample HR dataset looks like this:
 
 ```bash
-docker build -t rpt-mcp .
+docker build -t hr-rpt-mcp-server --build-arg BASE_IMAGE=python:3.12-slim .
 docker run \
   -p 8080:8080 \
   -e RPT_API_TOKEN=... \
-  -e RPT_DATASETS='{"ibm_hr": {"path": "/data/reference/WA_Fn-UseC_-HR-Employee-Attrition.csv"}}' \
-  -v $(pwd)/data/reference:/data/reference:ro \
-  rpt-mcp
+  -e RPT_DATASETS='{"ibm_hr": {"path": "/app/examples/data/reference/WA_Fn-UseC_-HR-Employee-Attrition.csv"}}' \
+  hr-rpt-mcp-server
 ```
 
-The container entrypoint defaults to `--transport sse --host 0.0.0.0 --port 8080`, so remote MCP
-clients can connect over Server-Sent Events without a separate wrapper process.
+Because the dataset lives under `examples/data/reference/`, the image bundles it automatically—no bind mount is required for the HR demo. The entrypoint defaults to `--transport sse --host 0.0.0.0 --port 8080`, so remote MCP clients can connect over Server-Sent Events without a separate wrapper process.
 
 ## IBM HR Attrition Examples
 
-1. Download `WA_Fn-UseC_-HR-Employee-Attrition.csv` from the [Kaggle dataset](https://www.kaggle.com/pavansubhasht/ibm-hr-analytics-attrition-dataset).
-2. Place it somewhere under your workspace, e.g. `data/reference/WA_Fn-UseC_-HR-Employee-Attrition.csv`.
-3. Install the optional dependencies used by the examples: `uv sync --extra dev --extra examples`.
-4. A synthetic survey file (`data/new_employee_survey.csv`) is included so you can immediately test the workflow without publishing Kaggle data.
+1. Install the optional dependencies used by the examples: `uv sync --extra dev --extra examples`.
+2. Use the bundled sample dataset (`examples/data/reference/WA_Fn-UseC_-HR-Employee-Attrition.csv`) or point `--reference` at your own Kaggle export.
+3. A synthetic survey file (`examples/data/new_employee_survey.csv`) is included so you can immediately test the workflow without publishing Kaggle data.
 
 ### Batch scenario 
 
 ```
 OPENAI_API_KEY=... RPT_API_TOKEN=... uv run python -m examples.batch_attrition_agent \
-  --survey data/new_employee_survey.csv \
-  --reference data/reference/WA_Fn-UseC_-HR-Employee-Attrition.csv
+  --survey examples/data/new_employee_survey.csv \
+  --reference examples/data/reference/WA_Fn-UseC_-HR-Employee-Attrition.csv
 ```
 
 The agent loads the 1,470-row IBM dataset as context, scores the 12 survey entries via `predict_classification`, flags everyone who seems likely to leave and produces an HR-friendly summary with risk factors and recommendations.

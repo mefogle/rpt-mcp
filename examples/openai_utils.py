@@ -87,7 +87,6 @@ async def generate_summary_text(model: str, prompt: str) -> str:
     chunks = _collect_response_text(response)
 
     # --- ADD THIS LINE TO TEST ---
-    print(f"DEBUG: Chunks collected: {chunks}")
     # -----------------------------
 
     text = _normalize_text(chunks)

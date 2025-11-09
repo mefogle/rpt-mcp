@@ -1,4 +1,5 @@
-FROM python:3.12-slim
+ARG BASE_IMAGE=python:3.12-slim
+FROM ${BASE_IMAGE}
 
 ENV UV_SYSTEM_PYTHON=1 \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -10,6 +11,7 @@ WORKDIR /app
 
 COPY pyproject.toml uv.lock README.md CODEX.md ./
 COPY src ./src
+COPY examples ./examples
 RUN uv sync --frozen --no-dev
 
 EXPOSE 8080

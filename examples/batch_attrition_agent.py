@@ -5,8 +5,8 @@ Batch attrition analysis example that uses the MCP server + OpenAI's Responses A
 Usage:
     OPENAI_API_KEY=... RPT_API_TOKEN=... \
         python examples/batch_attrition_agent.py \
-            --survey data/new_employee_survey.csv \
-            --reference data/reference/WA_Fn-UseC_-HR-Employee-Attrition.csv
+            --survey examples/data/new_employee_survey.csv \
+            --reference examples/data/reference/WA_Fn-UseC_-HR-Employee-Attrition.csv
 """
 from __future__ import annotations
 
@@ -37,11 +37,15 @@ def parse_args() -> argparse.Namespace:
         required=True,
         help="CSV file with new employee survey data (same schema as IBM HR dataset).",
     )
+    default_reference = Path(__file__).with_name("data").joinpath(
+        "reference",
+        "WA_Fn-UseC_-HR-Employee-Attrition.csv",
+    )
     parser.add_argument(
         "--reference",
         type=Path,
-        required=True,
-        help="Path to the IBM HR dataset used as MCP reference context.",
+        default=default_reference,
+        help="Path to the IBM HR dataset used as MCP reference context (defaults to the bundled sample).",
     )
     parser.add_argument(
         "--server-cmd",
@@ -110,6 +114,7 @@ async def run_analysis(args: argparse.Namespace) -> None:
 
     env = dict(os.environ)
     env.setdefault("RPT_API_TOKEN", os.environ.get("RPT_API_TOKEN", ""))
+    env.setdefault("RPT_MCP_LOG_LEVEL", "WARNING")
 
     server_params = StdioServerParameters(
         command=args.server_cmd[0],

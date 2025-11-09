@@ -4,7 +4,7 @@ Helper script that preloads the IBM HR Attrition dataset and launches the MCP se
 
 Example:
     RPT_API_TOKEN=... python scripts/run_attrition_server.py \
-        --dataset data/reference/WA_Fn-UseC_-HR-Employee-Attrition.csv
+        --dataset examples/data/reference/WA_Fn-UseC_-HR-Employee-Attrition.csv
 """
 from __future__ import annotations
 
@@ -20,11 +20,12 @@ logger = logging.getLogger(__name__)
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Start the MCP server with a pre-loaded IBM HR dataset.")
+    default_dataset = Path(__file__).resolve().parents[1] / "examples" / "data" / "reference" / "WA_Fn-UseC_-HR-Employee-Attrition.csv"
     parser.add_argument(
         "--dataset",
         type=Path,
-        required=True,
-        help="Path to WA_Fn-UseC_-HR-Employee-Attrition.csv",
+        default=default_dataset,
+        help="Path to WA_Fn-UseC_-HR-Employee-Attrition.csv (defaults to the bundled sample).",
     )
     parser.add_argument(
         "--dataset-id",
