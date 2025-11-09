@@ -58,12 +58,6 @@ def test_probability_for_label_handles_nested_sequences():
     assert utils.probability_for_label(payload) == pytest.approx(0.6)
 
 
-def test_high_risk_mask_thresholding():
-    probabilities = [
-        {"prediction": "Yes", "probability": 0.85},
-        {"prediction": "Yes", "probability": 0.65},
-        {"prediction": "No", "probability": 0.9},
-        0.72,
-    ]
-    mask = utils.high_risk_mask(probabilities, threshold=0.70)
-    assert mask == [True, False, False, True]
+def test_binary_probability_for_label():
+    assert utils.probability_for_label({"prediction": "Yes", "probability": 1.0}) == 1.0
+    assert utils.probability_for_label({"prediction": "No", "probability": 1.0}) == 0.0

@@ -62,12 +62,9 @@ All examples manage their own MCP subprocess via stdio; no separate server proce
 OPENAI_API_KEY=... RPT_API_TOKEN=... uv run python -m examples.batch_attrition_agent \
   --survey data/new_employee_survey.csv \
   --reference data/reference/WA_Fn-UseC_-HR-Employee-Attrition.csv
-
-OPENAI_API_KEY=... RPT_API_TOKEN=... uv run python -m examples.interactive_attrition_agent \
-  --reference data/reference/WA_Fn-UseC_-HR-Employee-Attrition.csv
 ```
 
-Both scripts expect the Kaggle IBM HR dataset for context; download it manually into `data/reference/` (ignored by git). They rely on the `examples` extra (`mcp`, `openai`).
+The batch agent expects the Kaggle IBM HR dataset for context; download it manually into `data/reference/` (ignored by git). It relies on the `examples` extra (`mcp`, `openai`).
 
 ### MCP Transport Notes
 

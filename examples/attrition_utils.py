@@ -5,7 +5,6 @@ from typing import Any, Dict, Iterable, List, Sequence
 DATASET_ID = "ibm_hr_attrition"
 TARGET_COLUMN = "Attrition"
 POSITIVE_LABEL = "Yes"
-HIGH_RISK_THRESHOLD = 0.70
 
 
 def risk_factor_rules(row: Dict[str, Any]) -> List[str]:
@@ -55,10 +54,3 @@ def probability_for_label(
                 return value
     return 0.0
 
-
-def high_risk_mask(probabilities: Sequence[Any], threshold: float = HIGH_RISK_THRESHOLD) -> List[bool]:
-    mask: List[bool] = []
-    for entry in probabilities:
-        prob = probability_for_label(entry)
-        mask.append(prob >= threshold)
-    return mask

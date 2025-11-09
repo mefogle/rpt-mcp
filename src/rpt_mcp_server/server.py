@@ -35,7 +35,7 @@ except ImportError:  # pragma: no cover
 mcp = FastMCP("sap-rpt-tabular-predictor")
 
 # Global caches for models and reference datasets
-_model_cache = {}
+_prediction_config_cache = {}
 _reference_data_cache = {}
 
 logger = logging.getLogger(__name__)
@@ -43,7 +43,6 @@ logger = logging.getLogger(__name__)
 PREDICT_TOKEN = "[PREDICT]"
 INDEX_COLUMN = "__row_id"
 MAX_CONTEXT_ROWS = 2048
-MAX_QUERY_ROWS = 25
 
 
 class SAPRPTError(RuntimeError):
@@ -256,7 +255,7 @@ def _invoke_prediction_pipeline(
     total_delay = 0.0
     query_offset = 0
 
-    for chunk_df in _chunk_dataframe(query_df, MAX_QUERY_ROWS):
+    for chunk_df in _chunk_dataframe(query_df, MAX_CONTEXT_ROWS):
         query_records = chunk_df.to_dict(orient="records")
         rows, query_ids = _build_prediction_payload(context_records, query_records, query_offset)
         report = client.predict(rows=rows, index_column=INDEX_COLUMN)
@@ -394,7 +393,7 @@ def list_cached_models() -> str:
         JSON string with information about cached models
     """
     models = []
-    for model_key, model_info in _model_cache.items():
+    for model_key, model_info in _prediction_config_cache.items():
         models.append({
             "key": model_key,
             "type": model_info['type'],
@@ -415,7 +414,6 @@ def predict_classification(
     test_data_json: str,
     max_context_size: int = 8192,
     bagging: int = 8,
-    return_probabilities: bool = True,
 ) -> dict:
     """
     Predict categorical values in tabular data via the SAP RPT cloud API.
@@ -446,7 +444,7 @@ def predict_classification(
         model_key = f"{model_dataset}_clf_{max_context_size}_{bagging}"
         api_base_url = getattr(client, "base_url", "sap-rpt-api")
         context_rows = min(len(reference_df), MAX_CONTEXT_ROWS) if reference_df is not None else 0
-        _model_cache[model_key] = {
+        _prediction_config_cache[model_key] = {
             'model': 'sap-rpt-api',
             'type': 'classifier',
             'dataset_id': dataset_id,
@@ -461,23 +459,8 @@ def predict_classification(
         result = {
             "predictions": predictions_list,
             "num_predictions": len(predictions_list),
-            "model_config": _model_cache[model_key]['config'],
+            "model_config": _prediction_config_cache[model_key]['config'],
         }
-
-        if return_probabilities:
-            probability_payload = []
-            classes = set()
-            for row in predictions_list:
-                row_probs = {}
-                for column, value in (row or {}).items():
-                    if value is None:
-                        row_probs[column] = []
-                        continue
-                    classes.add(value)
-                    row_probs[column] = [{"prediction": value, "probability": 1.0}]
-                probability_payload.append(row_probs)
-            result["probabilities"] = probability_payload
-            result["classes"] = sorted(classes)
 
         return result
 
@@ -551,7 +534,7 @@ def predict_regression(
         model_key = f"{model_dataset}_reg_{max_context_size}_{bagging}"
         api_base_url = getattr(client, "base_url", "sap-rpt-api")
         context_rows = min(len(reference_df), MAX_CONTEXT_ROWS) if reference_df is not None else 0
-        _model_cache[model_key] = {
+        _prediction_config_cache[model_key] = {
             'model': 'sap-rpt-api',
             'type': 'regressor',
             'dataset_id': dataset_id,
@@ -567,7 +550,7 @@ def predict_regression(
             "predictions": predictions_list,
             "num_predictions": len(predictions_list),
             "statistics": statistics,
-            "model_config": _model_cache[model_key]['config'],
+            "model_config": _prediction_config_cache[model_key]['config'],
         }
 
     except (SAPRPTError, RuntimeError) as exc:
@@ -657,7 +640,7 @@ def predict_batch_from_file(
         model_key = f"{model_dataset}_{task_type[:3]}_{max_context_size}_{bagging}"
         api_base_url = getattr(client, "base_url", "sap-rpt-api")
         context_rows = min(len(reference_df), MAX_CONTEXT_ROWS) if reference_df is not None else 0
-        _model_cache[model_key] = {
+        _prediction_config_cache[model_key] = {
             'model': 'sap-rpt-api',
             'type': task_type,
             'dataset_id': dataset_id,
@@ -700,17 +683,17 @@ def clear_model_cache(model_key: Optional[str] = None) -> dict:
     Returns:
         Dictionary with clearance status
     """
-    global _model_cache
+    global _prediction_config_cache
     
     if model_key:
-        if model_key in _model_cache:
-            del _model_cache[model_key]
+        if model_key in _prediction_config_cache:
+            del _prediction_config_cache[model_key]
             return {"status": "success", "cleared": model_key}
         else:
             return {"error": f"Model key '{model_key}' not found in cache"}
     else:
-        num_cleared = len(_model_cache)
-        _model_cache = {}
+        num_cleared = len(_prediction_config_cache)
+        _prediction_config_cache = {}
         return {"status": "success", "cleared_count": num_cleared}
 
 

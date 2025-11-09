@@ -23,9 +23,7 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from examples.attrition_utils import (
     DATASET_ID,
-    HIGH_RISK_THRESHOLD,
     TARGET_COLUMN,
-    probability_for_label,
     risk_factor_rules,
 )
 from examples.openai_utils import generate_summary_text
@@ -65,7 +63,8 @@ async def call_predict_classification(session: ClientSession, rows: List[Dict[st
         arguments={
             "dataset_id": DATASET_ID,
             "test_data_json": json.dumps(rows),
-            "return_probabilities": True,
+            "max_context_size": 8192,
+            "bagging": 8,
         },
     )
     for block in response.content:
@@ -85,20 +84,17 @@ class HighRiskEmployee:
 def build_high_risk_list(
     rows: List[Dict[str, Any]],
     predictions: List[Any],
-    probabilities: List[Any],
-    threshold: float = HIGH_RISK_THRESHOLD,
 ) -> List[HighRiskEmployee]:
     high_risk: List[HighRiskEmployee] = []
     for idx, row in enumerate(rows):
-        probability = probability_for_label(probabilities[idx])
-        if probability < threshold:
+        prediction = predictions[idx] if idx < len(predictions) else None
+        if prediction != "Yes":
             continue
-        prediction = predictions[idx] if idx < len(predictions) else "Yes"
         employee_id = str(row.get("EmployeeNumber", f"row-{idx+1}"))
         high_risk.append(
             HighRiskEmployee(
                 employee_id=employee_id,
-                probability=probability,
+                probability=1.0,
                 prediction=prediction,
                 risk_factors=risk_factor_rules(row),
             )
@@ -127,15 +123,8 @@ async def run_analysis(args: argparse.Namespace) -> None:
             prediction_payload = await call_predict_classification(session, survey_rows)
 
     raw_predictions = prediction_payload.get("predictions", [])
-    raw_probabilities = prediction_payload.get("probabilities", [])
-
     predictions = [row.get(TARGET_COLUMN) if row else None for row in raw_predictions]
-    probabilities = [
-        (row_probs or {}).get(TARGET_COLUMN, []) if isinstance(row_probs, dict) else []
-        for row_probs in raw_probabilities
-    ]
-
-    high_risk = build_high_risk_list(survey_rows, predictions, probabilities)
+    high_risk = build_high_risk_list(survey_rows, predictions)
 
     summary_context = {
         "total_rows": len(survey_rows),

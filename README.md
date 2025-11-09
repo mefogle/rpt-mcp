@@ -69,31 +69,17 @@ clients can connect over Server-Sent Events without a separate wrapper process.
 3. Install the optional dependencies used by the examples: `uv sync --extra dev --extra examples`.
 4. A synthetic survey file (`data/new_employee_survey.csv`) is included so you can immediately test the workflow without publishing Kaggle data.
 
-### Batch scenario with 50 employees
+### Batch scenario 
 
 ```
-# Terminal 1 – start the MCP server and preload the dataset
-RPT_API_TOKEN=... uv run python -m scripts.run_attrition_server \
-  --dataset data/reference/WA_Fn-UseC_-HR-Employee-Attrition.csv
-
-# Terminal 2 – run an agent that calls predict_classification with new survey rows
 OPENAI_API_KEY=... RPT_API_TOKEN=... uv run python -m examples.batch_attrition_agent \
   --survey data/new_employee_survey.csv \
   --reference data/reference/WA_Fn-UseC_-HR-Employee-Attrition.csv
 ```
 
-The agent loads the 1,470-row IBM dataset as context, scores the 50 survey entries via `predict_classification`, flags everyone above the 70 % threshold, and produces an HR-friendly summary with risk factors and recommendations.
+The agent loads the 1,470-row IBM dataset as context, scores the 12 survey entries via `predict_classification`, flags everyone who seems likely to leave and produces an HR-friendly summary with risk factors and recommendations.
 
 > The synthetic survey rows capture a mix of scenarios (new grads, mid-level scientists, sales executives with long commutes, etc.) so the classifier produces both low- and high-risk predictions that showcase how the agent surfaces risk factors.
-
-### Conversational one-off inquiry
-
-```
-OPENAI_API_KEY=... RPT_API_TOKEN=... uv run python -m examples.interactive_attrition_agent \
-  --reference data/reference/WA_Fn-UseC_-HR-Employee-Attrition.csv
-```
-
-The script greets you as the agent, asks follow-up questions (job satisfaction, work-life balance, commute, income, etc.), and once it has enough detail it calls `predict_classification` for that single employee. The response includes the attrition probability, the key drivers (e.g., “Low job satisfaction, 3 years without promotion”), and concrete retention steps so you can act quickly.
 
 ## Testing
 

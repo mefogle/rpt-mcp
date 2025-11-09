@@ -13,11 +13,11 @@ PREDICT_TOKEN = server.PREDICT_TOKEN
 @pytest.fixture(autouse=True)
 def reset_caches():
     server._reference_data_cache.clear()
-    server._model_cache.clear()
+    server._prediction_config_cache.clear()
     server.set_rpt_client(None)
     yield
     server._reference_data_cache.clear()
-    server._model_cache.clear()
+    server._prediction_config_cache.clear()
     server.set_rpt_client(None)
 
 
@@ -137,7 +137,6 @@ def test_predict_classification_allows_query_only(mock_rpt_client):
     test_rows = [{"region": "na", "segment": "enterprise", "churned": None}]
     result = server.predict_classification(
         test_data_json=json.dumps(test_rows),
-        return_probabilities=False,
     )
 
     assert result["num_predictions"] == 1
@@ -159,11 +158,11 @@ def test_predict_classification_returns_predictions(classification_dataset, mock
     predictions = result["predictions"]
     assert predictions[0]["churned"] == "yes"
     assert predictions[1]["churned"] == "no"
-    assert "probabilities" in result
+    assert "predictions" in result
 
     model_key = "classification_clf_8192_8"
-    assert model_key in server._model_cache
-    assert server._model_cache[model_key]["type"] == "classifier"
+    assert model_key in server._prediction_config_cache
+    assert server._prediction_config_cache[model_key]["type"] == "classifier"
 
 
 def test_predict_regression_returns_statistics(regression_dataset, mock_rpt_client):
@@ -222,10 +221,9 @@ def test_clear_model_cache_removes_entries(classification_dataset, mock_rpt_clie
     server.predict_classification(
         dataset_id="classification",
         test_data_json=json.dumps(test_rows),
-        return_probabilities=False,
     )
 
-    assert server._model_cache  # ensure populated
+    assert server._prediction_config_cache  # ensure populated
     cleared = server.clear_model_cache()
     assert cleared["cleared_count"] == 1
-    assert not server._model_cache
+    assert not server._prediction_config_cache
